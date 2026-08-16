@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools >= 61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "protenix-mlx-export"
+version = "0.1.0"
+requires-python = ">=3.11"
+description = "Export Protenix checkpoints to MLX Swift artifacts"
+readme = "README.md"
+dependencies = [
+    "torch>=2.2",
+    "numpy>=1.26",
+    "safetensors>=0.5.3",
+    "click>=8.1",
+    "mlx>=0.31.2",
+    # The pinned upstream config tree under src/_protenix_upstream needs only these.
+    "ml_collections>=0.1.1",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+protenix-mlx = "protenix_mlx_export.cli:cli"
+
+[project.optional-dependencies]
+test = ["pytest"]
+lint = ["ruff"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["protenix_mlx_export*", "configs*", "protenix*"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
