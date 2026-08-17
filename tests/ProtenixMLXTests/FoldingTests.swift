@@ -61,6 +61,43 @@ struct FoldingTests {
     #expect(variance.squareRoot() > 0.01)
   }
 
+  @Test("per-atom confidence reaches the PDB's B-factor column")
+  func writesConfidenceToBFactors() throws {
+    // The B-factor column is where "colour by confidence" reads from, and it is
+    // column-positional: a value written one character wide of columns 61-66 pushes the
+    // element symbol out of alignment and every parser downstream disagrees about it.
+    let bundle = try Featurizer.bundle(sequence: "GG")
+    let atomCount = bundle.metadata.atomCount
+    let coordinates = MLXArray.zeros([atomCount, 3])
+    let plddt = MLXArray((0..<atomCount).map { Float($0) + 70.5 })
+    let pdb = StructureWriter.pdb(
+      coordinates: coordinates, atoms: bundle.metadata.atoms, bFactors: plddt)
+
+    let records = pdb.split(separator: "\n").filter { $0.hasPrefix("ATOM") }
+    #expect(records.count == atomCount)
+    for (index, record) in records.enumerated() {
+      let columns = Array(record)
+      let field = String(columns[60..<66]).trimmingCharacters(in: .whitespaces)
+      #expect(field == String(format: "%.2f", Float(index) + 70.5))
+      // Element symbol still in columns 77-78, which the widened field could displace.
+      #expect(String(columns[76..<78]).trimmingCharacters(in: .whitespaces).isEmpty == false)
+    }
+  }
+
+  @Test("a structure with no confidence behind it writes zero, not a fabricated value")
+  func writesZeroWithoutConfidence() throws {
+    let bundle = try Featurizer.bundle(sequence: "GG")
+    let pdb = StructureWriter.pdb(
+      coordinates: MLXArray.zeros([bundle.metadata.atomCount, 3]),
+      atoms: bundle.metadata.atoms)
+    let records = pdb.split(separator: "\n").filter { $0.hasPrefix("ATOM") }
+    for record in records {
+      let field = String(Array(record)[60..<66]).trimmingCharacters(in: .whitespaces)
+      // Not 100.00, which is what a "confident" default would read as in every viewer.
+      #expect(field == "0.00")
+    }
+  }
+
   @Test("the noise schedule descends from s_max*sigma_data to exactly zero")
   func noiseSchedule() {
     let schedule = DiffusionSampler.noiseSchedule(steps: 200, sigmaData: 16.0)

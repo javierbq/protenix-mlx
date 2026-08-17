@@ -85,17 +85,31 @@ class FixtureCase:
     run: Callable[[torch.nn.Module, dict[str, torch.Tensor]], Any] | None = None
 
 
+#: Parameters that are ARCHITECTURE, not weights, and must survive randomization.
+#:
+#: The confidence head's bin edges are `nn.Parameter(requires_grad=False)`, so they look
+#: like weights to `module.parameters()` -- but they are a monotonic ladder of distances
+#: the one-hot compares against. Replaced with noise they stop being ordered, every
+#: distance falls outside every bin, and the resulting all-zero one-hot means the fixture
+#: would pass with `linear_no_bias_d` deleted entirely. That is the exact failure mode
+#: this function exists to prevent, one level up.
+_STRUCTURAL_PARAMETERS = ("lower_bins", "upper_bins")
+
+
 def _randomize(module: torch.nn.Module, seed: int) -> torch.nn.Module:
-    """Replace every parameter with seeded noise.
+    """Replace every learned parameter with seeded noise.
 
     Upstream initializes many matrices to exact zeros (`initializer="zeros"` on the
     AdaLN projections and every transition's output). A fixture built on those would
     pass even if the Swift side dropped the term entirely, so all parameters get real
-    values here regardless of how they were initialized.
+    values here regardless of how they were initialized -- except the structural ones
+    above, where randomizing causes the same blindness it is meant to cure.
     """
     generator = torch.Generator().manual_seed(seed)
     with torch.no_grad():
-        for parameter in module.parameters():
+        for name, parameter in module.named_parameters():
+            if name.split(".")[-1] in _STRUCTURAL_PARAMETERS:
+                continue
             parameter.copy_(
                 torch.randn(parameter.shape, generator=generator) * 0.5
             )
@@ -460,6 +474,23 @@ def _cases() -> list[FixtureCase]:
             run=_run_trunk,
         ),
         FixtureCase(
+            name="confidence_head",
+            build=_build_confidence_head,
+            config={
+                # 16 heads and 32-wide, not SMALL's: the head hardcodes its stack's
+                # head count. See _build_confidence_head.
+                "n_blocks": 2, "c_s": 32, "c_z": 32, "n_heads": 16,
+                # TriangleAttention's own default, which is not the block's.
+                "n_pair_heads": 4,
+                "c_s_inputs": 32 + 32 + 32 + 1,
+                "max_atoms_per_token": 8,
+                "distance_bin_start": 3.25, "distance_bin_end": 52.0,
+                "distance_bin_step": 1.25,
+                "n_atoms": SMALL["n_atoms"], "n_tokens": n_tokens,
+            },
+            run=_run_confidence_head,
+        ),
+        FixtureCase(
             name="diffusion_module",
             build=_build_diffusion_module,
             config={
@@ -755,6 +786,90 @@ def _build_trunk():
 
 def _run_trunk(module: Any, inputs: dict) -> dict:
     return module(module._feature_dict, module._msa_features, module._token_bonds)
+
+
+def _build_confidence_head():
+    """The confidence head, plus a trunk output and a set of coordinates to score.
+
+    Every parameter is randomized by `_randomize` afterwards, which matters more here
+    than anywhere else: upstream zero-initializes `linear_no_bias_pae`,
+    `linear_no_bias_pde`, `plddt_weight` and `resolved_weight`, so a fixture built on
+    the initialized values would pass even if the Swift port dropped all four heads.
+    """
+    from protenix.model.modules.confidence import ConfidenceHead  # noqa: PLC0415
+
+    # Wider than SMALL, and deliberately so: ConfidenceHead does not forward `n_heads`
+    # to its PairformerStack, so the stack takes upstream's default of 16 and both
+    # widths must divide by it. SMALL's c_s of 24 does not, and the assertion fires
+    # inside AttentionPairBias rather than anywhere that names the cause.
+    c_z, c_s = 32, 32
+    n_tokens, n_atoms = SMALL["n_tokens"], SMALL["n_atoms"]
+    c_s_inputs = c_s + 32 + 32 + 1
+    max_atoms_per_token = 8
+
+    module = ConfidenceHead(
+        n_blocks=2, c_s=c_s, c_z=c_z, c_s_inputs=c_s_inputs,
+        max_atoms_per_token=max_atoms_per_token, pairformer_dropout=0.0)
+
+    generator = torch.Generator().manual_seed(31)
+    # Atoms distributed over tokens in order, so atom_to_token_idx is non-decreasing the
+    # way a real chain's is; one atom per token is flagged as its representative.
+    # Uneven on purpose -- 11 atoms over 7 tokens is [2, 2, 2, 2, 1, 1, 1], so the
+    # per-atom heads are exercised with more than one atom index AND with tokens that
+    # differ in size, which is what a real chain looks like.
+    sizes = [
+        n_atoms // n_tokens + (1 if index < n_atoms % n_tokens else 0)
+        for index in range(n_tokens)
+    ]
+    atom_to_token = torch.zeros(n_atoms, dtype=torch.long)
+    atom_to_tokatom = torch.zeros(n_atoms, dtype=torch.long)
+    rep_mask = torch.zeros(n_atoms, dtype=torch.long)
+    atom = 0
+    for token, size in enumerate(sizes):
+        for within in range(size):
+            atom_to_token[atom] = token
+            atom_to_tokatom[atom] = within
+            # First atom of each token stands for it, as CB (or CA) does for a residue.
+            if within == 0:
+                rep_mask[atom] = 1
+            atom += 1
+    # Every token must have a representative or the distance matrix loses a row.
+    assert int(rep_mask.sum()) == n_tokens, "one representative atom per token"
+    assert max(sizes) <= max_atoms_per_token, "a token has more atoms than weights"
+
+    inputs = {
+        "s_inputs": torch.randn(1, n_tokens, c_s_inputs, generator=generator),
+        "s_trunk": torch.randn(1, n_tokens, c_s, generator=generator),
+        "z_trunk": torch.randn(1, n_tokens, n_tokens, c_z, generator=generator),
+        # Spread over several Angstroms so the distances land in different bins; a
+        # tight cloud would put every pair in bin 0 and hide a binning error.
+        "x_pred_coords": torch.randn(1, 1, n_atoms, 3, generator=generator) * 8.0,
+        "atom_to_token_idx": atom_to_token.float(),
+        "atom_to_tokatom_idx": atom_to_tokatom.float(),
+        "distogram_rep_atom_mask": rep_mask.float(),
+    }
+    module._inputs = inputs
+    return module, inputs
+
+
+def _run_confidence_head(module: Any, inputs: dict) -> dict:
+    feature_dict = {
+        "atom_to_token_idx": inputs["atom_to_token_idx"].long(),
+        "atom_to_tokatom_idx": inputs["atom_to_tokatom_idx"].long(),
+        "distogram_rep_atom_mask": inputs["distogram_rep_atom_mask"].long(),
+    }
+    plddt, pae, pde, resolved = module(
+        input_feature_dict=feature_dict,
+        s_inputs=inputs["s_inputs"],
+        s_trunk=inputs["s_trunk"],
+        z_trunk=inputs["z_trunk"],
+        pair_mask=None,
+        x_pred_coords=inputs["x_pred_coords"],
+    )
+    return {
+        "plddt_logits": plddt, "pae_logits": pae, "pde_logits": pde,
+        "resolved_logits": resolved,
+    }
 
 
 def _build_diffusion_module():

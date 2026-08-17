@@ -468,4 +468,95 @@ struct ParityTests {
     #expect(output.shape == fixture.expected.shape)
     #expect(maximumDeviation(output, fixture.expected) < tolerance)
   }
+
+  @Test("confidence head matches upstream on all four outputs")
+  func confidenceHead() throws {
+    guard let fixture = try fixture("confidence_head") else { return }
+    let store = try fixture.store(rootedAt: "m")
+    let head = try ConfidenceHead(
+      store: store, path: "m",
+      configuration: ProtenixModelConfiguration.ConfidenceSection(
+        nBlocks: fixture.integer("n_blocks"), cS: fixture.integer("c_s"),
+        cZ: fixture.integer("c_z"), cSInputs: fixture.integer("c_s_inputs"),
+        maxAtomsPerToken: fixture.integer("max_atoms_per_token"),
+        distanceBinStart: 3.25, distanceBinEnd: 52.0, distanceBinStep: 1.25,
+        hiddenScaleUp: false),
+      headCount: fixture.integer("n_heads"),
+      // TriangleAttention's head count is NOT the block's: upstream defaults
+      // AttentionPairBias to 16 heads and TriangleAttention to 4, and the confidence
+      // head takes both defaults.
+      pairHeadCount: fixture.integer("n_pair_heads"))
+
+    // The fixture records coordinates as [1, 1, N_atom, 3] -- one sample of one batch --
+    // and the head takes the atoms alone.
+    let coordinates = fixture.input("x_pred_coords").reshaped([
+      fixture.integer("n_atoms"), 3,
+    ])
+    let logits = head.logits(
+      coordinates: coordinates, sInputs: fixture.input("s_inputs"),
+      sTrunk: fixture.input("s_trunk"), zTrunk: fixture.input("z_trunk"),
+      atomToToken: fixture.input("atom_to_token_idx"),
+      representativeAtoms: fixture.input("distogram_rep_atom_mask"),
+      atomToTokenAtom: fixture.input("atom_to_tokatom_idx"))
+
+    // All four, because they diverge after the shared Pairformer: pLDDT and resolved
+    // read the single track through per-atom weights, PAE reads the pair track and PDE
+    // reads its symmetrization. Checking one would leave three paths unverified.
+    let expectations: [(String, MLXArray)] = [
+      ("plddt", logits.plddt), ("pae", logits.pae), ("pde", logits.pde),
+      ("resolved", logits.resolved),
+    ]
+    for (name, actual) in expectations {
+      let expected = fixture.tensors["output.\(name)_logits"]!
+      #expect(
+        actual.size == expected.size, "\(name): \(actual.shape) vs \(expected.shape)")
+      let deviation = maximumDeviation(
+        actual.reshaped([actual.size]), expected.reshaped([expected.size]))
+      #expect(deviation < tolerance, "\(name) deviates by \(deviation)")
+    }
+  }
+
+  @Test("confidence scores land in the ranges their consumers assume")
+  func confidenceScoreRanges() throws {
+    guard let fixture = try fixture("confidence_head") else { return }
+    let store = try fixture.store(rootedAt: "m")
+    let head = try ConfidenceHead(
+      store: store, path: "m",
+      configuration: ProtenixModelConfiguration.ConfidenceSection(
+        nBlocks: fixture.integer("n_blocks"), cS: fixture.integer("c_s"),
+        cZ: fixture.integer("c_z"), cSInputs: fixture.integer("c_s_inputs"),
+        maxAtomsPerToken: fixture.integer("max_atoms_per_token"),
+        distanceBinStart: 3.25, distanceBinEnd: 52.0, distanceBinStep: 1.25,
+        hiddenScaleUp: false),
+      headCount: fixture.integer("n_heads"),
+      pairHeadCount: fixture.integer("n_pair_heads"))
+
+    let atomCount = fixture.integer("n_atoms")
+    let tokenCount = fixture.integer("n_tokens")
+    let scores = head(
+      coordinates: fixture.input("x_pred_coords").reshaped([atomCount, 3]),
+      sInputs: fixture.input("s_inputs"), sTrunk: fixture.input("s_trunk"),
+      zTrunk: fixture.input("z_trunk"),
+      atomToToken: fixture.input("atom_to_token_idx"),
+      representativeAtoms: fixture.input("distogram_rep_atom_mask"),
+      atomToTokenAtom: fixture.input("atom_to_tokatom_idx"),
+      tokenCount: tokenCount)
+
+    // pLDDT is per ATOM and on 0-100 -- it goes in a B-factor column, where a 0-1 value
+    // would render as uniformly hopeless confidence and nobody would notice it was a
+    // unit error rather than a bad fold.
+    #expect(scores.plddt.shape == [atomCount])
+    #expect(scores.plddt.min().item(Float.self) >= 0)
+    #expect(scores.plddt.max().item(Float.self) <= 100)
+    #expect(scores.meanPLDDT >= 0 && scores.meanPLDDT <= 100)
+    // PAE is per TOKEN PAIR and in Angstroms, bounded by its bin range.
+    #expect(scores.pae.shape == [tokenCount, tokenCount])
+    #expect(scores.pae.min().item(Float.self) >= 0)
+    #expect(scores.pae.max().item(Float.self) <= 32)
+    #expect(scores.pde.shape == [tokenCount, tokenCount])
+    // Resolved is a probability per atom.
+    #expect(scores.resolved.shape == [atomCount])
+    #expect(scores.resolved.min().item(Float.self) >= 0)
+    #expect(scores.resolved.max().item(Float.self) <= 1)
+  }
 }

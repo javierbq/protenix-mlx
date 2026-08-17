@@ -12,16 +12,27 @@ struct ProtenixMLXCommand: ParsableCommand {
   )
 }
 
-/// Fold a sequence: model artifact + feature bundle -> a PDB structure.
+/// Fold a sequence: model artifact + sequence (or feature bundle) -> a PDB structure.
 struct Predict: ParsableCommand {
   static let configuration = CommandConfiguration(
-    abstract: "Fold a feature bundle into coordinates and write a PDB.")
+    abstract: "Fold a sequence into coordinates and write a PDB.",
+    discussion: """
+      Give either --sequence, which featurizes here in Swift and needs nothing but the \
+      model pack, or --features, a bundle from `protenix-mlx export-features`. The two \
+      produce identical tensors for a canonical-20 protein; the bundle path exists for \
+      inputs the Swift featurizer does not carry reference conformers for.
+      """)
 
   @Option(name: .long, help: "An exported model artifact directory.")
   var model: String
 
+  @Option(
+    name: .long,
+    help: "Protein sequence to fold. Separate the chains of a complex with \"/\".")
+  var sequence: String?
+
   @Option(name: .long, help: "A feature bundle from `export-features`.")
-  var features: String
+  var features: String?
 
   @Option(name: .long, help: "Where to write the PDB.")
   var output: String
@@ -32,10 +43,26 @@ struct Predict: ParsableCommand {
   @Option(name: .long, help: "RNG seed.")
   var seed: Int = 0
 
+  @Flag(
+    name: .long,
+    help: "Run the confidence head and write per-atom pLDDT into the B-factor column.")
+  var confidence: Bool = false
+
+  func validate() throws {
+    if (sequence == nil) == (features == nil) {
+      throw ValidationError("give exactly one of --sequence or --features")
+    }
+  }
+
   func run() throws {
     let artifact = try ProtenixArtifact.load(
       from: URL(fileURLWithPath: model))
-    let bundle = try FeatureBundle.load(from: URL(fileURLWithPath: features))
+    let bundle =
+      if let sequence {
+        try Featurizer.bundle(sequence: sequence)
+      } else {
+        try FeatureBundle.load(from: URL(fileURLWithPath: features!))
+      }
     let predictor = try ProtenixPredictor(artifact: artifact)
 
     print("model        \(artifact.configuration.modelName)")
@@ -45,10 +72,25 @@ struct Predict: ParsableCommand {
     print(
       "diffusion    \(diffusionSteps ?? predictor.diffusionSteps) steps")
 
-    let coordinates = try predictor.fold(
-      bundle: bundle, seed: UInt64(seed), diffusionSteps: diffusionSteps)
+    var coordinates: MLXArray
+    var scores: ConfidenceHead.Scores?
+    if confidence {
+      let prediction = try predictor.foldScored(
+        bundle: bundle, seed: UInt64(seed), diffusionSteps: diffusionSteps)
+      coordinates = prediction.coordinates
+      scores = prediction.scores
+    } else {
+      coordinates = try predictor.fold(
+        bundle: bundle, seed: UInt64(seed), diffusionSteps: diffusionSteps)
+      scores = nil
+    }
+
+    if let scores {
+      print(String(format: "mean pLDDT   %.1f", scores.meanPLDDT))
+    }
     let pdb = StructureWriter.pdb(
-      coordinates: coordinates, atoms: bundle.metadata.atoms)
+      coordinates: coordinates, atoms: bundle.metadata.atoms,
+      bFactors: scores?.plddt)
     try pdb.write(
       to: URL(fileURLWithPath: output), atomically: true, encoding: .utf8)
     print("\nwrote \(bundle.metadata.atomCount) atoms to \(output)")
