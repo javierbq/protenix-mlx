@@ -26,7 +26,7 @@ cache already speaks.
 | Swift confidence head (pLDDT / PAE / PDE / resolved) | **working, verified** |
 | Distogram head, templates, real MSA, ligands, nucleic acids | not implemented |
 
-**55 Swift tests, 92 Python tests.** Every learned component of the structure path —
+**56 Swift tests, 92 Python tests.** Every learned component of the structure path —
 trunk, diffusion and the confidence head — reproduces upstream PyTorch to within 2e-4,
 verified by fixtures recorded from the real modules.
 

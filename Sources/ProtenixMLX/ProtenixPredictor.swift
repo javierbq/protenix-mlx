@@ -72,10 +72,16 @@ public struct ProtenixPredictor {
         store: store, path: "confidence_head",
         configuration: model.confidenceHead,
         // The confidence head does not forward a head count to its own Pairformer, so
-        // it takes upstream's defaults: 16 for AttentionPairBias, 4 for
-        // TriangleAttention. These are NOT the trunk Pairformer's, which the config
-        // does name.
-        headCount: 16, pairHeadCount: 4)
+        // AttentionPairBias takes upstream's default of 16. TriangleAttention's count is
+        // NOT a constant, though: under `hidden_scale_up` upstream recomputes it as
+        // `c_z / c_hidden_pair_att`, so v2's 256-wide pair track needs 8 heads where
+        // every other variant needs 4. Hardcoding 4 loaded v2's weights into a
+        // 4-head layout and died at the first triangle attention with
+        // "Shapes (1,N,4,N,N) and (1,1,8,N,N) cannot be broadcast" -- the trunk got this
+        // right and only the head did not, so it reproduced on v2 alone.
+        headCount: 16,
+        pairHeadCount: model.confidenceHead.hiddenScaleUp
+          ? model.confidenceHead.cZ / 32 : 4)
     }
   }
 

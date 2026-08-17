@@ -346,4 +346,17 @@ struct WeightStoreTests {
     #expect(sampler.gammaMin == 1.0)
     #expect(sampler.noiseScaleLambda == 1.003)
   }
+
+  @Test("the confidence head's triangle-attention heads scale with its pair width")
+  func confidencePairHeadsFollowHiddenScaleUp() throws {
+    // v2 is the only variant with hidden_scale_up, and it is the only one this was ever
+    // wrong for: upstream recomputes no_heads_pair as c_z / c_hidden_pair_att under that
+    // flag, so a 256-wide pair track needs 8 heads where 128 needs 4. Hardcoded at 4,
+    // every v2 pack died at the first triangle attention with
+    // "Shapes (1,N,4,N,N) and (1,1,8,N,N) cannot be broadcast" -- after a 285 MB
+    // download, as an MLX fatal error rather than a refusal.
+    func heads(cZ: Int, scaled: Bool) -> Int { scaled ? cZ / 32 : 4 }
+    #expect(heads(cZ: 128, scaled: false) == 4)   // tiny, mini, base
+    #expect(heads(cZ: 256, scaled: true) == 8)    // v2
+  }
 }
