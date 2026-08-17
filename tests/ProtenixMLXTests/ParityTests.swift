@@ -360,6 +360,38 @@ struct ParityTests {
     #expect(bias.min().item(Float.self) < -1e9)
   }
 
+  @Test("diffusion module denoise step matches upstream end to end")
+  func diffusionModule() throws {
+    guard let fixture = try fixture("diffusion_module") else { return }
+    let store = try fixture.store(rootedAt: "m")
+    let module = try DiffusionModule(
+      store: store, path: "m", sigmaData: 16.0,
+      atomEncoderBlocks: fixture.integer("atom_encoder_blocks"),
+      atomEncoderHeads: fixture.integer("atom_encoder_heads"),
+      transformerBlocks: fixture.integer("transformer_blocks"),
+      transformerHeads: fixture.integer("transformer_heads"),
+      atomDecoderBlocks: fixture.integer("atom_decoder_blocks"),
+      atomDecoderHeads: fixture.integer("atom_decoder_heads"),
+      rMax: fixture.integer("r_max"), sMax: fixture.integer("s_max"))
+
+    let features = AtomAttentionEncoder.Features(
+      refPos: fixture.input("ref_pos"), refCharge: fixture.input("ref_charge"),
+      refMask: fixture.input("ref_mask"), refElement: fixture.input("ref_element"),
+      refAtomNameChars: fixture.input("ref_atom_name_chars"),
+      atomToToken: fixture.input("atom_to_token_idx"), dLM: fixture.input("d_lm"),
+      vLM: fixture.input("v_lm"), maskTrunked: fixture.input("mask_trunked"))
+    let context = DiffusionModule.Context(
+      features: features, relativeFeatures: fixture.input("relp"),
+      sInputs: fixture.input("s_inputs"), sTrunk: fixture.input("s_trunk"),
+      zTrunk: fixture.input("z_trunk"), tokenCount: fixture.integer("n_tokens"))
+
+    let output = module(
+      xNoisy: fixture.input("x_noisy"), noiseLevel: fixture.input("t_hat"),
+      context: context)
+    #expect(output.shape == fixture.expected.shape)
+    #expect(maximumDeviation(output, fixture.expected) < tolerance)
+  }
+
   @Test("atom attention encoder matches upstream")
   func atomAttentionEncoder() throws {
     guard let fixture = try fixture("atom_attention_encoder") else { return }

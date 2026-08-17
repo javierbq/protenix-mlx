@@ -454,6 +454,20 @@ def _cases() -> list[FixtureCase]:
             run=_run_atom_encoder,
         ),
         FixtureCase(
+            name="diffusion_module",
+            build=_build_diffusion_module,
+            config={
+                "sigma_data": 16.0, "c_atom": c_a, "c_atompair": SMALL["c_atompair"],
+                "c_token": c_a, "c_s": c_s, "c_z": c_z,
+                "atom_encoder_blocks": 2, "atom_encoder_heads": n_heads,
+                "transformer_blocks": 2, "transformer_heads": n_heads,
+                "atom_decoder_blocks": 2, "atom_decoder_heads": n_heads,
+                "n_atoms": SMALL["n_atoms"], "n_tokens": n_tokens,
+                "r_max": 32, "s_max": 2,
+            },
+            run=_run_diffusion_module,
+        ),
+        FixtureCase(
             name="atom_attention_decoder",
             build=_build_atom_decoder,
             config={
@@ -596,6 +610,89 @@ def _build_atom_decoder():
     return module, inputs
 
 
+def _build_diffusion_module():
+    """A whole DiffusionModule at small dims, plus one denoise step's inputs."""
+    from protenix.model.modules.diffusion import DiffusionModule
+    from protenix.model.modules.embedders import RelativePositionEncoding
+
+    c_z, c_s, c_a = SMALL["c_z"], SMALL["c_s"], SMALL["c_a"]
+    c_token = SMALL["c_a"]  # divisible by n_heads
+    n_atoms, n_tokens = SMALL["n_atoms"], SMALL["n_tokens"]
+    heads = SMALL["n_heads"]
+    generator = torch.Generator().manual_seed(17)
+
+    module = DiffusionModule(
+        sigma_data=16.0, c_atom=c_a, c_atompair=SMALL["c_atompair"], c_token=c_token,
+        c_s=c_s, c_z=c_z, c_s_inputs=c_s,
+        atom_encoder={"n_blocks": 2, "n_heads": heads},
+        transformer={"n_blocks": 2, "n_heads": heads},
+        atom_decoder={"n_blocks": 2, "n_heads": heads},
+    )
+
+    atom_to_token, feats = _atom_features(n_atoms, n_tokens, c_z, c_s, c_a)
+
+    # Build the relp one-hot the conditioning consumes, from toy token indices.
+    relpe = RelativePositionEncoding(c_z=c_z)
+    token_ids = torch.arange(n_tokens)
+    feature_dict = {
+        "asym_id": torch.zeros(1, n_tokens, dtype=torch.long),
+        "residue_index": token_ids.reshape(1, n_tokens).long(),
+        "entity_id": torch.zeros(1, n_tokens, dtype=torch.long),
+        "token_index": token_ids.reshape(1, n_tokens).long(),
+        "sym_id": torch.zeros(1, n_tokens, dtype=torch.long),
+    }
+    relpe.generate_relp(feature_dict)
+
+    input_feature_dict = {
+        "atom_to_token_idx": atom_to_token,
+        "ref_pos": feats["ref_pos"],
+        "ref_charge": torch.randn(1, n_atoms, generator=generator),
+        "ref_mask": torch.ones(1, n_atoms),
+        "ref_element": torch.randn(1, n_atoms, 128, generator=generator),
+        "ref_atom_name_chars": torch.randn(1, n_atoms, 4 * 64, generator=generator),
+        "d_lm": feats["d_lm"],
+        "v_lm": feats["v_lm"],
+        "pad_info": feats["pad_info"],
+        "relp": feature_dict["relp"],
+    }
+    inputs = {
+        "x_noisy": torch.randn(1, 1, n_atoms, 3, generator=generator) * 8,
+        "t_hat": torch.rand(1, 1, generator=generator) * 20 + 1,
+        "s_inputs": torch.randn(1, n_tokens, c_s, generator=generator),
+        "s_trunk": torch.randn(1, n_tokens, c_s, generator=generator),
+        "z_trunk": torch.randn(1, n_tokens, n_tokens, c_z, generator=generator),
+        # The relp and atom features travel with the module rather than as plain
+        # tensors, so they are recorded separately for the Swift side to rebuild.
+        "relp": feature_dict["relp"],
+        "atom_to_token_idx": atom_to_token,
+        "ref_pos": input_feature_dict["ref_pos"],
+        "ref_charge": input_feature_dict["ref_charge"],
+        "ref_mask": input_feature_dict["ref_mask"],
+        "ref_element": input_feature_dict["ref_element"],
+        "ref_atom_name_chars": input_feature_dict["ref_atom_name_chars"],
+        "d_lm": input_feature_dict["d_lm"],
+        "v_lm": input_feature_dict["v_lm"].float(),
+        "mask_trunked": feats["pad_info"]["mask_trunked"].float(),
+    }
+    module._feature_dict = input_feature_dict  # stashed for the run callback
+    return module, inputs
+
+
+def _run_diffusion_module(module: Any, inputs: dict) -> Any:
+    """One denoise step through the assembled DiffusionModule."""
+    return module(
+        x_noisy=inputs["x_noisy"],
+        t_hat_noise_level=inputs["t_hat"],
+        input_feature_dict=module._feature_dict,
+        s_inputs=inputs["s_inputs"],
+        s_trunk=inputs["s_trunk"],
+        z_trunk=inputs["z_trunk"],
+        pair_z=None,
+        p_lm=None,
+        c_l=None,
+    )
+
+
 def _run_atom_encoder(module: Any, inputs: dict) -> dict:
     """Run AtomAttentionEncoder.forward (has_coords) and name its four outputs."""
     a, q_l, c_l, p_lm = module(
@@ -726,6 +823,7 @@ def case_names() -> tuple[str, ...]:
         "attention_pair_bias_with_s",
         "conditioned_transition_block",
         "diffusion_conditioning",
+        "diffusion_module",
         "diffusion_transformer",
         "diffusion_transformer_block",
         "msa_module",
