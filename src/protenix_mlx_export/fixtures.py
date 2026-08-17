@@ -44,6 +44,7 @@ SMALL = {
     "n_heads": 4,
     "n_tokens": 7,
     "n_seq": 5,
+    "c_noise": 16,
 }
 
 
@@ -223,6 +224,14 @@ def _cases() -> list[FixtureCase]:
         ),
     ]
 
+    from protenix.model.modules.diffusion import (  # noqa: PLC0415
+        DiffusionConditioning,
+    )
+    from protenix.model.modules.transformer import (  # noqa: PLC0415
+        ConditionedTransitionBlock,
+        DiffusionTransformer,
+        DiffusionTransformerBlock,
+    )
     from protenix.model.modules.pairformer import (  # noqa: PLC0415
         MSAModule,
         MSAPairWeightedAveraging,
@@ -329,6 +338,70 @@ def _cases() -> list[FixtureCase]:
             ),
         ),
         FixtureCase(
+            name="conditioned_transition_block",
+            build=lambda: (
+                ConditionedTransitionBlock(c_a=c_a, c_s=c_s, n=2),
+                {"a": single(c_a), "s": single(c_s)},
+            ),
+            config={"c_a": c_a, "c_s": c_s, "n": 2},
+            run=lambda module, inputs: module(a=inputs["a"], s=inputs["s"]),
+        ),
+        FixtureCase(
+            name="diffusion_transformer_block",
+            build=lambda: (
+                DiffusionTransformerBlock(
+                    c_a=c_a, c_s=c_s, c_z=c_z, n_heads=n_heads
+                ),
+                {"a": single(c_a), "s": single(c_s), "z": pair()},
+            ),
+            config={"c_a": c_a, "c_s": c_s, "c_z": c_z, "n_heads": n_heads},
+            # Returns (a, s, z); only `a` is updated.
+            run=lambda module, inputs: module(
+                a=inputs["a"], s=inputs["s"], z=inputs["z"]
+            )[0],
+        ),
+        FixtureCase(
+            name="diffusion_transformer",
+            build=lambda: (
+                DiffusionTransformer(
+                    c_a=c_a, c_s=c_s, c_z=c_z, n_blocks=3, n_heads=n_heads
+                ),
+                {"a": single(c_a), "s": single(c_s), "z": pair()},
+            ),
+            config={
+                "c_a": c_a, "c_s": c_s, "c_z": c_z, "n_blocks": 3,
+                "n_heads": n_heads,
+            },
+            run=lambda module, inputs: module(
+                a=inputs["a"], s=inputs["s"], z=inputs["z"]
+            ),
+        ),
+        FixtureCase(
+            # Exercised through the two halves the port exposes -- the pair half is
+            # noise-independent and cacheable, the single half is not.
+            name="diffusion_conditioning",
+            build=lambda: (
+                DiffusionConditioning(
+                    sigma_data=16.0, c_z=c_z, c_s=c_s, c_s_inputs=c_s,
+                    c_noise_embedding=SMALL["c_noise"],
+                ),
+                {
+                    "t_hat_noise_level": torch.rand(1, 2) * 10 + 0.1,
+                    "s_inputs": single(c_s),
+                    "s_trunk": single(c_s),
+                    "z_trunk": pair(),
+                    # The relp one-hot block, width 4*r_max + 2*s_max + 7 with
+                    # DiffusionConditioning's default r_max=32, s_max=2.
+                    "relpe": torch.randn(1, n_tokens, n_tokens, 4 * 32 + 2 * 2 + 7),
+                },
+            ),
+            config={
+                "sigma_data": 16.0, "c_z": c_z, "c_s": c_s, "c_s_inputs": c_s,
+                "c_noise": SMALL["c_noise"], "r_max": 32, "s_max": 2,
+            },
+            run=lambda module, inputs: _run_conditioning(module, inputs),
+        ),
+        FixtureCase(
             # Three blocks, so an error in how blocks are chained (feeding the wrong
             # tensor forward, or reusing block 0's weights) cannot hide.
             name="pairformer_stack",
@@ -357,6 +430,20 @@ def _cases() -> list[FixtureCase]:
         ),
     ]
     return cases
+
+
+def _run_conditioning(module: Any, inputs: dict) -> dict:
+    """Drive DiffusionConditioning through both halves the Swift port exposes."""
+    pair = module.prepare_cache(inputs["relpe"], inputs["z_trunk"])
+    single, pair_out = module(
+        t_hat_noise_level=inputs["t_hat_noise_level"],
+        relp_feature=inputs["relpe"],
+        s_inputs=inputs["s_inputs"],
+        s_trunk=inputs["s_trunk"],
+        z_trunk=inputs["z_trunk"],
+        pair_z=pair,
+    )
+    return {"pair": pair_out, "single": single}
 
 
 def _run_msa_blocks(module: Any, m: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
@@ -465,6 +552,10 @@ def case_names() -> tuple[str, ...]:
         "adaptive_layernorm",
         "attention_pair_bias_no_s",
         "attention_pair_bias_with_s",
+        "conditioned_transition_block",
+        "diffusion_conditioning",
+        "diffusion_transformer",
+        "diffusion_transformer_block",
         "msa_module",
         "msa_pair_weighted_averaging",
         "msa_stack",

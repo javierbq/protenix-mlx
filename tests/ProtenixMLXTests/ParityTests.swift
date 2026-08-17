@@ -273,6 +273,58 @@ struct ParityTests {
     #expect(maximumDeviation(output, fixture.expected) < tolerance)
   }
 
+  @Test("conditioned transition block matches upstream")
+  func conditionedTransitionBlock() throws {
+    guard let fixture = try fixture("conditioned_transition_block") else { return }
+    let block = try ConditionedTransitionBlock(
+      store: fixture.store(rootedAt: "m"), path: "m")
+    let output = block(fixture.input("a"), fixture.input("s"))
+    #expect(maximumDeviation(output, fixture.expected) < tolerance)
+  }
+
+  @Test("diffusion transformer block matches upstream")
+  func diffusionTransformerBlock() throws {
+    guard let fixture = try fixture("diffusion_transformer_block") else { return }
+    let block = try DiffusionTransformerBlock(
+      store: fixture.store(rootedAt: "m"), path: "m",
+      headCount: fixture.integer("n_heads"))
+    let output = block(fixture.input("a"), fixture.input("s"), fixture.input("z"))
+    #expect(maximumDeviation(output, fixture.expected) < tolerance)
+  }
+
+  @Test("diffusion transformer matches upstream across blocks")
+  func diffusionTransformer() throws {
+    guard let fixture = try fixture("diffusion_transformer") else { return }
+    let transformer = try DiffusionTransformer(
+      store: fixture.store(rootedAt: "m"), path: "m",
+      blockCount: fixture.integer("n_blocks"),
+      headCount: fixture.integer("n_heads"))
+    #expect(transformer.blockCount == 3)
+    let output = transformer(
+      fixture.input("a"), fixture.input("s"), fixture.input("z"))
+    #expect(maximumDeviation(output, fixture.expected) < tolerance)
+  }
+
+  @Test("diffusion conditioning matches upstream on both halves")
+  func diffusionConditioning() throws {
+    guard let fixture = try fixture("diffusion_conditioning") else { return }
+    let conditioning = try DiffusionConditioning(
+      store: fixture.store(rootedAt: "m"), path: "m",
+      sigmaData: 16.0, rMax: fixture.integer("r_max"), sMax: fixture.integer("s_max"))
+
+    let pair = conditioning.preparePair(
+      zTrunk: fixture.input("z_trunk"), relativeFeatures: fixture.input("relpe"))
+    #expect(maximumDeviation(pair, fixture.tensors["output.pair"]!) < tolerance)
+
+    // The noise level is passed raw; the log(sigma/sigma_data)/4 scaling belongs to
+    // the module, and applying it twice would still produce a plausible embedding.
+    let single = conditioning.prepareSingle(
+      noiseLevel: fixture.input("t_hat_noise_level"),
+      sInputs: fixture.input("s_inputs"),
+      sTrunk: fixture.input("s_trunk"))
+    #expect(maximumDeviation(single, fixture.tensors["output.single"]!) < tolerance)
+  }
+
   @Test("outer product mean matches upstream")
   func outerProductMean() throws {
     guard let fixture = try fixture("outer_product_mean") else { return }
