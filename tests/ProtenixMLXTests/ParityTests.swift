@@ -378,7 +378,7 @@ struct ParityTests {
       refAtomNameChars: fixture.input("ref_atom_name_chars"),
       atomToToken: fixture.input("atom_to_token_idx"), dLM: fixture.input("d_lm"),
       vLM: fixture.input("v_lm"), maskTrunked: fixture.input("mask_trunked"))
-    let output = trunk(
+    let output = try trunk(
       atomFeatures: features, restype: fixture.input("restype"),
       profile: fixture.input("profile"), deletionMean: fixture.input("deletion_mean"),
       relativeFeatures: fixture.input("relp"), tokenBonds: fixture.input("token_bonds"),

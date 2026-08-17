@@ -53,10 +53,13 @@ public struct DiffusionSampler {
   ///     in here once and reused across every step.
   ///   - atomCount: N_atom, the number of atoms to place.
   ///   - steps: diffusion steps (5 for mini/tiny, 200 for base/v2).
+  ///   - progress: called after each step; return false to cancel, which throws
+  ///     ``ProtenixError/cancelled``. Between steps is the finest granularity that
+  ///     exists — the MLX work of a step is already in flight by the time it starts.
   public func callAsFunction(
     context input: DiffusionModule.Context, atomCount: Int, nSamples: Int = 1,
-    steps: Int, seed: UInt64 = 0
-  ) -> MLXArray {
+    steps: Int, seed: UInt64 = 0, progress: FoldProgressHandler? = nil
+  ) throws -> MLXArray {
     var key = MLXRandom.key(seed)
     let schedule = Self.noiseSchedule(steps: steps, sigmaData: module.sigmaData)
 
@@ -98,7 +101,15 @@ public struct DiffusionSampler {
       let delta = (xNoisy - denoised) / tHat
       let dt = sigmaNext - tHat
       x = xNoisy + stepScaleEta * dt * delta
+      // Evaluated per step rather than at the end: the graph is what gets cancelled
+      // between steps, and an unevaluated 200-step graph would defer all the work past
+      // every cancellation check, making the handler a no-op that looks like one.
       MLX.eval(x)
+      if let progress,
+        !progress(FoldProgress(phase: .diffusion, step: index + 1, total: steps))
+      {
+        throw ProtenixError.cancelled(phase: "diffusion", step: index + 1)
+      }
     }
     return x
   }

@@ -88,11 +88,14 @@ public struct ProtenixTrunk {
   ///   - relativeFeatures: `[..., N, N, featureWidth]` relative-position one-hot.
   ///   - tokenBonds: `[..., N, N]` bonded-pair indicator.
   ///   - msaFeatures: `[..., S, N, 34]` sampled MSA feature block.
+  ///   - progress: called after each recycle; return false to cancel. The trunk is
+  ///     roughly half a base-model fold's wall clock, so a cancel that could only be
+  ///     observed by the sampler would be ignored for minutes.
   public func callAsFunction(
     atomFeatures: AtomAttentionEncoder.Features, restype: MLXArray, profile: MLXArray,
     deletionMean: MLXArray, relativeFeatures: MLXArray, tokenBonds: MLXArray,
-    msaFeatures: MLXArray, tokenCount: Int
-  ) -> Output {
+    msaFeatures: MLXArray, tokenCount: Int, progress: FoldProgressHandler? = nil
+  ) throws -> Output {
     let sInputs = inputEmbedder(
       features: atomFeatures, restype: restype, profile: profile,
       deletionMean: deletionMean, tokenCount: tokenCount)
@@ -107,7 +110,7 @@ public struct ProtenixTrunk {
     var z = MLXArray.zeros(like: zInit)
     var s = MLXArray.zeros(like: sInit)
 
-    for _ in 0..<cycleCount {
+    for cycle in 0..<cycleCount {
       z = zInit + linearZCycle(TensorOps.layerNorm(z, normZCycle))
       // Template embedder skipped: nil for the variants in scope.
       let m = msaModule.embed(msaFeatures: msaFeatures, singleInputs: sInputs)
@@ -117,6 +120,11 @@ public struct ProtenixTrunk {
       s = updatedS!
       z = updatedZ
       MLX.eval(s, z)
+      if let progress,
+        !progress(FoldProgress(phase: .trunk, step: cycle + 1, total: cycleCount))
+      {
+        throw ProtenixError.cancelled(phase: "trunk", step: cycle + 1)
+      }
     }
     return Output(sInputs: sInputs, s: s, z: z)
   }

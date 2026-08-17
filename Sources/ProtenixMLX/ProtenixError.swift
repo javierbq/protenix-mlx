@@ -21,6 +21,8 @@ public enum ProtenixError: Error, Equatable, Sendable {
   case unsupportedResidue(String)
   case emptyChain(String)
   case tooManyChains(count: Int, limit: Int)
+  /// The progress handler asked for the fold to stop. Not a failure.
+  case cancelled(phase: String, step: Int)
 }
 
 extension ProtenixError: LocalizedError {
@@ -66,6 +68,8 @@ extension ProtenixError: LocalizedError {
       return "chain \(chain) has no residues"
     case .tooManyChains(let count, let limit):
       return "\(count) chains exceeds the \(limit) this runtime labels"
+    case .cancelled(let phase, let step):
+      return "fold cancelled during \(phase) at step \(step)"
     }
   }
 }

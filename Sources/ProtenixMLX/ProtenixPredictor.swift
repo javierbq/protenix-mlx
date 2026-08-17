@@ -72,13 +72,15 @@ public struct ProtenixPredictor {
   ///
   /// - Parameters:
   ///   - recyclingSteps/diffusionSteps: override the artifact's defaults; nil uses them.
+  ///   - progress: called after each trunk recycle and each diffusion step; return
+  ///     false to cancel, which throws ``ProtenixError/cancelled``.
   public func fold(
     bundle: FeatureBundle, seed: UInt64 = 0, recyclingSteps: Int? = nil,
-    diffusionSteps: Int? = nil
+    diffusionSteps: Int? = nil, progress: FoldProgressHandler? = nil
   ) throws -> MLXArray {
     try predict(
       bundle: bundle, seed: seed, recyclingSteps: recyclingSteps,
-      diffusionSteps: diffusionSteps, scoring: false
+      diffusionSteps: diffusionSteps, scoring: false, progress: progress
     ).coordinates
   }
 
@@ -88,25 +90,25 @@ public struct ProtenixPredictor {
   /// it is a separate entry point rather than something `fold` always does.
   public func foldScored(
     bundle: FeatureBundle, seed: UInt64 = 0, recyclingSteps: Int? = nil,
-    diffusionSteps: Int? = nil
+    diffusionSteps: Int? = nil, progress: FoldProgressHandler? = nil
   ) throws -> Prediction {
     guard reportsConfidence else {
       throw ProtenixError.missingTensor("confidence_head.plddt_weight")
     }
     return try predict(
       bundle: bundle, seed: seed, recyclingSteps: recyclingSteps,
-      diffusionSteps: diffusionSteps, scoring: true)
+      diffusionSteps: diffusionSteps, scoring: true, progress: progress)
   }
 
   private func predict(
     bundle: FeatureBundle, seed: UInt64, recyclingSteps: Int?, diffusionSteps: Int?,
-    scoring: Bool
+    scoring: Bool, progress: FoldProgressHandler? = nil
   ) throws -> Prediction {
     let atomFeatures = try bundle.atomFeatures()
     let tokenCount = bundle.metadata.tokenCount
     let atomCount = bundle.metadata.atomCount
 
-    let trunkOutput = trunk(
+    let trunkOutput = try trunk(
       atomFeatures: atomFeatures,
       restype: bundle.batched(try bundle.tensor("restype")),
       profile: bundle.batched(try bundle.tensor("profile")),
@@ -114,7 +116,7 @@ public struct ProtenixPredictor {
       relativeFeatures: bundle.batched(try bundle.tensor("relp")),
       tokenBonds: bundle.batched(try bundle.tensor("token_bonds")),
       msaFeatures: bundle.batched(try bundle.tensor("msa_features")),
-      tokenCount: tokenCount)
+      tokenCount: tokenCount, progress: progress)
     MLX.eval(trunkOutput.s, trunkOutput.z, trunkOutput.sInputs)
 
     let context = DiffusionModule.Context(
@@ -122,15 +124,20 @@ public struct ProtenixPredictor {
       sInputs: trunkOutput.sInputs, sTrunk: trunkOutput.s, zTrunk: trunkOutput.z,
       tokenCount: tokenCount)
 
-    let sampled = sampler(
+    let sampled = try sampler(
       context: context, atomCount: atomCount, nSamples: 1,
-      steps: diffusionSteps ?? self.diffusionSteps, seed: seed)
+      steps: diffusionSteps ?? self.diffusionSteps, seed: seed, progress: progress)
     MLX.eval(sampled)
     // [1, 1, N_atom, 3] -> [N_atom, 3].
     let coordinates = sampled.reshaped([atomCount, 3])
 
     guard scoring, let confidence else {
       return Prediction(coordinates: coordinates, scores: nil)
+    }
+    if let progress,
+      !progress(FoldProgress(phase: .confidence, step: 0, total: 1))
+    {
+      throw ProtenixError.cancelled(phase: "confidence", step: 0)
     }
     // Scored on the coordinates just produced -- the head predicts the error in THIS
     // structure, so it cannot be run before the sampler or reused across seeds.
@@ -141,6 +148,7 @@ public struct ProtenixPredictor {
       representativeAtoms: try bundle.tensor("distogram_rep_atom_mask"),
       atomToTokenAtom: try bundle.tensor("atom_to_tokatom_idx"),
       tokenCount: tokenCount)
+    _ = progress?(FoldProgress(phase: .confidence, step: 1, total: 1))
     return Prediction(coordinates: coordinates, scores: scores)
   }
 }

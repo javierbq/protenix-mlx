@@ -11,6 +11,14 @@ import Testing
 /// PyTorch (the sampler draws its own noise), so it asserts the properties a correct
 /// fold must have: finite coordinates of the right shape, and a near-zero centroid,
 /// since every step re-centres on the origin.
+/// Collects progress steps from the @Sendable handler.
+final class StepRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var stored: [Int] = []
+  var steps: [Int] { lock.withLock { stored } }
+  func record(_ step: Int) { lock.withLock { stored.append(step) } }
+}
+
 @Suite("Folding")
 struct FoldingTests {
 
@@ -44,7 +52,7 @@ struct FoldingTests {
 
     let atomCount = fixture.input("ref_pos").shape[fixture.input("ref_pos").ndim - 2]
     let sampler = DiffusionSampler(module: module)
-    let coordinates = sampler(
+    let coordinates = try sampler(
       context: context, atomCount: atomCount, nSamples: 1, steps: 5, seed: 0)
     coordinates.eval()
 
@@ -96,6 +104,89 @@ struct FoldingTests {
       // Not 100.00, which is what a "confident" default would read as in every viewer.
       #expect(field == "0.00")
     }
+  }
+
+  @Test("the sampler reports every step and can be cancelled between them")
+  func progressAndCancellation() throws {
+    guard let fixture = try Fixture.load("diffusion_module") else {
+      print("SKIP progress: no diffusion_module fixture")
+      return
+    }
+    let store = try fixture.store(rootedAt: "m")
+    let module = try DiffusionModule(
+      store: store, path: "m", sigmaData: 16.0,
+      atomEncoderBlocks: fixture.integer("atom_encoder_blocks"),
+      atomEncoderHeads: fixture.integer("atom_encoder_heads"),
+      transformerBlocks: fixture.integer("transformer_blocks"),
+      transformerHeads: fixture.integer("transformer_heads"),
+      atomDecoderBlocks: fixture.integer("atom_decoder_blocks"),
+      atomDecoderHeads: fixture.integer("atom_decoder_heads"),
+      rMax: fixture.integer("r_max"), sMax: fixture.integer("s_max"))
+    let features = AtomAttentionEncoder.Features(
+      refPos: fixture.input("ref_pos"), refCharge: fixture.input("ref_charge"),
+      refMask: fixture.input("ref_mask"), refElement: fixture.input("ref_element"),
+      refAtomNameChars: fixture.input("ref_atom_name_chars"),
+      atomToToken: fixture.input("atom_to_token_idx"), dLM: fixture.input("d_lm"),
+      vLM: fixture.input("v_lm"), maskTrunked: fixture.input("mask_trunked"))
+    let context = DiffusionModule.Context(
+      features: features, relativeFeatures: fixture.input("relp"),
+      sInputs: fixture.input("s_inputs"), sTrunk: fixture.input("s_trunk"),
+      zTrunk: fixture.input("z_trunk"), tokenCount: fixture.integer("n_tokens"))
+    let atomCount = fixture.input("ref_pos").shape[fixture.input("ref_pos").ndim - 2]
+    let sampler = DiffusionSampler(module: module)
+
+    // The handler is @Sendable, so shared state goes through a reference the way a real
+    // caller's does -- RayMol reads its cancellation flag under a lock for the same reason.
+    let recorder = StepRecorder()
+
+    // Every step reported, in order, none skipped.
+    _ = try sampler(
+      context: context, atomCount: atomCount, nSamples: 1, steps: 5, seed: 0,
+      progress: { recorder.record($0.step); return true })
+    #expect(recorder.steps == [1, 2, 3, 4, 5])
+
+    // Cancelling at step 2 stops there. The count is what makes this a real test: a
+    // handler whose `false` were ignored would still run all five and throw nothing.
+    let cancelling = StepRecorder()
+    #expect(throws: ProtenixError.cancelled(phase: "diffusion", step: 2)) {
+      _ = try sampler(
+        context: context, atomCount: atomCount, nSamples: 1, steps: 5, seed: 0,
+        progress: {
+          cancelling.record($0.step)
+          return cancelling.steps.count < 2
+        })
+    }
+    #expect(cancelling.steps == [1, 2])
+  }
+
+  @Test("the progress fraction rises monotonically across phases and ends at one")
+  func progressFraction() {
+    // A fraction that went backwards between phases -- which a naive
+    // step/(recycles+steps) does when the phases have different step counts -- reads as
+    // a stalled or restarting job in any progress UI.
+    var last = -1.0
+    for step in 0...10 {
+      let value = FoldProgress(phase: .trunk, step: step, total: 10).fraction
+      #expect(value >= last)
+      last = value
+    }
+    for step in 0...200 {
+      let value = FoldProgress(phase: .diffusion, step: step, total: 200).fraction
+      #expect(value >= last)
+      last = value
+    }
+    for step in 0...1 {
+      let value = FoldProgress(phase: .confidence, step: step, total: 1).fraction
+      #expect(value >= last)
+      last = value
+    }
+    #expect(last == 1.0)
+    #expect(FoldProgress(phase: .trunk, step: 0, total: 10).fraction == 0)
+  }
+
+  @Test("a phase with no steps does not divide by zero")
+  func zeroStepPhase() {
+    #expect(FoldProgress(phase: .trunk, step: 0, total: 0).fraction == 0)
   }
 
   @Test("the noise schedule descends from s_max*sigma_data to exactly zero")
