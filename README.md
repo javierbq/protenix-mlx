@@ -34,28 +34,56 @@ they require ESM2-3B alongside, which does not fit an on-device budget.
 
 | Variant | Params | Pairformer | Diffusion | Template | Recycles / steps | Checkpoint |
 | :--- | ---: | ---: | ---: | :--- | :--- | :--- |
-| `protenix_tiny_default_v0.5.0` | 109.5 M | 8 | 8 | inert (0 blocks) | 4 / 5 | available |
-| `protenix_mini_default_v0.5.0` | 134.1 M | 16 | 8 | inert (0 blocks) | 4 / 5 | available |
-| `protenix_base_default_v1.0.0` | 368.5 M | 48 | 24 | 2 blocks | 10 / 200 | available |
-| `protenix-v2` | 464.4 M | 48 | 24 | 2 blocks, `c_z`=256 | 10 / 200 | **403** |
+| `protenix_tiny_default_v0.5.0` | 109.5 M | 8 | 8 | inert (0 blocks) | 4 / 5 | official |
+| `protenix_mini_default_v0.5.0` | 134.1 M | 16 | 8 | inert (0 blocks) | 4 / 5 | official |
+| `protenix_base_default_v1.0.0` | 368.5 M | 48 | 24 | 2 blocks | 10 / 200 | official |
+| `protenix-v2` | 464.4 M | 48 | 24 | 2 blocks, `c_z`=256 | 10 / 200 | **mirror** |
 
-**`protenix-v2` cannot currently be packed.** Upstream lists its checkpoint URL in
-`protenix/web_service/dependency_url.py`, but as of 2026-08-16 the bucket answers
-`403 AccessDenied` for that one file while every other released checkpoint answers 200.
-The exporter supports the variant in full — its architecture resolves, and a pack would
-build the moment the file is reachable. Third-party Hugging Face mirrors exist
-(`TMF001/protenix-v2-weights`, `nabbo/protenix_v2`); none is used here, because a pack's
-entire contract is a digest over weights of known provenance.
+### protenix-v2 provenance
+
+Three of the four checkpoints come from ByteDance's own bucket. **`protenix-v2` does
+not.** Its official URL has answered `403 AccessDenied` since April 2026, deliberately —
+a ByteDance collaborator stated in
+[issue #296](https://github.com/bytedance/Protenix/issues/296) that "accessibility of the
+protenix-v2 checkpoint is currently under review as part of our company-level internal
+evaluation process". Every other released checkpoint answers 200 from the same network.
+
+Packs for it are built from `TMF001/protenix-v2-weights` on Hugging Face. What that rests
+on:
+
+- The mirror is **byte-faithful where it can be checked**: its copy of
+  `protenix_mini_default_v0.5.0.pt` hashes to
+  `3803340c…791f81`, identical to the file downloaded straight from ByteDance's CDN.
+- The v2 file **audits clean** (`scripts/audit_checkpoint.py`): exactly 464,442,431
+  parameters, `c_z` 256, block depths 48/4/24/4, a module tree matching the
+  officially-sourced base checkpoint on all 4174 tensor names, and weight statistics of a
+  trained network (LayerNorm gains mean 0.43 / std 0.55, none left at exactly 1.0).
+
+What it does **not** rest on:
+
+- **No official checksum exists for any Protenix checkpoint.** All 30 GitHub releases
+  carry zero binary assets, the repo publishes no hashes, and `download_from_url`'s only
+  integrity check is that `torch.load` succeeds. So nothing authoritative can confirm the
+  weight *values*; that needs an accuracy benchmark.
+- The uploader states they have no affiliation with the Protenix team, and has not said
+  how they obtained the file.
+
+Accordingly the v2 checkpoint is pinned by digest
+(`8f931f97…0d599` — the exporter refuses to build from anything else), and every v2
+artifact records `"checkpoint_provenance": "mirror"` plus its source URL in `config.json`,
+so a pack cannot later be mistaken for one built from an official download. Consider
+whether redistributing it is appropriate for your setting before publishing those packs.
 
 ### Built packs
 
-Nine packs, all verified against the checkpoint they came from. Release ZIP sizes:
+Twelve packs, all verified against the checkpoint they came from. Release ZIP sizes:
 
 | Variant | Quantized matrices | int8 | float16 | bfloat16 |
 | :--- | ---: | ---: | ---: | ---: |
-| tiny (110.65 M) | 733 | **83.5 MB** | 165.2 MB | 144.6 MB |
-| mini (134.07 M) | 1020 | **91.8 MB** | 184.5 MB | 163.7 MB |
-| base (368.48 M) | 2645 | **214.3 MB** | 447.2 MB | 398.4 MB |
+| tiny (110.65 M) | 733 | **87.5 MB** | 173.2 MB | 151.6 MB |
+| mini (134.07 M) | 1020 | **96.2 MB** | 193.5 MB | 171.7 MB |
+| base (368.48 M) | 2645 | **224.7 MB** | 468.9 MB | 417.7 MB |
+| v2 (464.44 M) *mirror* | 2645 | **299.4 MB** | 610.5 MB | 560.6 MB |
 
 Weight fidelity, worst tensor per pack (tiny):
 

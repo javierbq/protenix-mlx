@@ -179,6 +179,48 @@ class TestVariantConfigs:
             ModelConfiguration.from_model_name("protenix_imaginary_v9")
 
 
+class TestProvenance:
+    """A mirrored checkpoint must stay identifiable as one after it leaves here."""
+
+    def test_official_variants_are_marked_official(self) -> None:
+        configuration = ModelConfiguration.from_model_name(TINY)
+        assert configuration.checkpoint_provenance == "official"
+
+    def test_mirrored_variant_records_its_source(self) -> None:
+        configuration = ModelConfiguration.from_model_name("protenix-v2")
+        assert configuration.checkpoint_provenance == "mirror"
+        assert "huggingface.co" in configuration.checkpoint_source_url
+
+    def test_provenance_survives_a_config_round_trip(self, tmp_path: Path) -> None:
+        # The whole point is that it reaches a consumer reading config.json.
+        path = tmp_path / "config.json"
+        ModelConfiguration.from_model_name("protenix-v2").write(path)
+        assert ModelConfiguration.read(path).checkpoint_provenance == "mirror"
+        assert json.loads(path.read_text())["checkpoint_provenance"] == "mirror"
+
+    def test_only_mirrored_variants_pin_a_digest(self) -> None:
+        # ByteDance publishes no checksums, so an official variant has nothing to pin
+        # against and must not pretend otherwise.
+        for variant in VARIANTS:
+            if variant.is_mirrored:
+                assert variant.expected_sha256, f"{variant.name} pins no digest"
+            else:
+                assert variant.expected_sha256 is None
+
+    def test_export_rejects_a_checkpoint_that_is_not_the_audited_one(
+        self, tmp_path: Path
+    ) -> None:
+        # Right shape, wrong bytes: a re-download that silently differs from the file
+        # the audit was run against must not be packed as though it were.
+        path = tmp_path / "protenix-v2.pt"
+        torch.save({"model": {"module.pairformer_stack.a.weight": torch.zeros(4, 8)}},
+                   path)
+        with pytest.raises(ValueError, match="not the checkpoint that was audited"):
+            export_checkpoint(
+                checkpoint=path, output=tmp_path / "o", model_name="protenix-v2"
+            )
+
+
 class TestManifest:
     def _manifest(self, **overrides: object) -> ArtifactManifest:
         values: dict = {

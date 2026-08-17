@@ -117,9 +117,17 @@ class ModelConfiguration:
     quantized_matrix_count: int = 0
     graph_roots: tuple[str, ...] = field(default_factory=tuple)
 
+    #: ``"official"`` when the checkpoint came from ByteDance's own bucket, otherwise
+    #: the mirror it came from. Carried into the artifact so a pack built from a
+    #: mirrored checkpoint stays identifiable as one after it leaves this machine --
+    #: the manifest's digest attests to the bytes, not to where they came from.
+    checkpoint_provenance: str = "official"
+    checkpoint_source_url: str = ""
+
     @classmethod
     def from_model_name(cls, model_name: str) -> ModelConfiguration:
         """Resolve one variant's architecture from the pinned config tree."""
+        variant = get_variant(model_name)
         configs = resolve_upstream_config(model_name)
         model = _json_mapping(configs.model)
         sample_diffusion = _json_mapping(configs.sample_diffusion)
@@ -140,6 +148,8 @@ class ModelConfiguration:
             model=model,
             sample_diffusion=sample_diffusion,
             inference_noise_scheduler=noise_scheduler,
+            checkpoint_provenance=variant.provenance,
+            checkpoint_source_url=variant.url,
         )
 
     def with_checkpoint_facts(
@@ -423,10 +433,26 @@ def export_checkpoint(
     # in a second rather than after a multi-gigabyte load.
     configuration = ModelConfiguration.from_model_name(model_name)
 
+    # A mirrored checkpoint has a digest known from outside the file, so pin it before
+    # doing anything else: hashing is far cheaper than loading two gigabytes, and for
+    # a mirrored file "these are not the bytes that were audited" is the most useful
+    # thing that can be said, whatever else is also wrong with it.
+    #
+    # This cannot establish that the weights are ByteDance's -- no official checksum
+    # exists for any Protenix checkpoint -- only that the pack was built from the same
+    # bytes the audit ran against.
+    digest = _sha256(checkpoint)
+    variant = get_variant(model_name)
+    if variant.expected_sha256 and digest != variant.expected_sha256:
+        message = (
+            f"{checkpoint.name} has sha256 {digest} but {model_name} is pinned to "
+            f"{variant.expected_sha256}; this is not the checkpoint that was audited"
+        )
+        raise ValueError(message)
+
     state, _version = read_state_dict(checkpoint)
     _assert_matrix_invariant(state)
     parameter_count = _check_parameter_count(model_name, state)
-    digest = _sha256(checkpoint)
 
     if precision is Precision.INT8:
         manifest, quantized_count = _export_int8(

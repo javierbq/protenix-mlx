@@ -42,10 +42,25 @@ class Variant:
     #: strict load; a raw state dict also carries buffers, so the two differ slightly.
     params_tolerance_m: float = 1.5
 
+    #: Where the checkpoint comes from. ``"official"`` means ByteDance's own bucket;
+    #: ``"mirror"`` means a third party. Recorded in every artifact's config.json so a
+    #: pack cannot be mistaken later for one built from an official download.
+    provenance: str = "official"
+
+    #: Digest the checkpoint is expected to have, where one is known from outside the
+    #: file itself. Only set for mirrored checkpoints -- ByteDance publishes no
+    #: checksums, so for official downloads there is nothing to pin against.
+    expected_sha256: str | None = None
+
     @property
     def checkpoint_filename(self) -> str:
         """Basename upstream's own downloader writes, and what we expect locally."""
         return f"{self.name}.pt"
+
+    @property
+    def is_mirrored(self) -> bool:
+        """Whether this variant's weights came from somewhere other than upstream."""
+        return self.provenance != "official"
 
 
 #: The four variants in scope. `base_20250630` is deliberately absent: it is the same
@@ -71,17 +86,33 @@ VARIANTS: tuple[Variant, ...] = (
         url="https://protenix.tos-cn-beijing.volces.com/checkpoint/protenix_base_default_v1.0.0.pt",
         published_params_m=368.48,
     ),
-    # Kept because the export path is complete for it -- only the checkpoint is out of
-    # reach. Upstream lists this URL in `protenix/web_service/dependency_url.py`, but
-    # as of 2026-08-16 the bucket answers 403 AccessDenied for it while every other
-    # released checkpoint answers 200. Third-party Hugging Face mirrors exist; none is
-    # used here, because a pack's whole contract is a digest over weights of known
-    # provenance.
+    # MIRROR-SOURCED, unlike every other variant here. Upstream's own URL
+    # (protenix.tos-cn-beijing.volces.com/checkpoint/protenix-v2.pt) has answered 403
+    # since April 2026 -- deliberately: a ByteDance collaborator stated in issue #296
+    # that "accessibility of the protenix-v2 checkpoint is currently under review as
+    # part of our company-level internal evaluation process".
+    #
+    # The mirror below is used on the user's explicit decision. What that decision
+    # rests on, and what it does not:
+    #   * The mirror is byte-faithful where it can be checked -- its copy of
+    #     protenix_mini_default_v0.5.0.pt is identical to ByteDance's own CDN copy
+    #     (sha256 3803340c5d9958c038e799ddd2b53b532db21855f261592ad455a5f003791f81).
+    #   * The v2 file audits clean: exactly 464,442,431 parameters, c_z 256, block
+    #     depths 48/4/24/4, a module tree matching the officially-sourced base
+    #     checkpoint 4174/4174, and weight statistics of a trained network.
+    #   * ByteDance publishes no checksum for ANY checkpoint, so nothing authoritative
+    #     exists to verify the values against. The uploader disclaims affiliation with
+    #     the Protenix team and has not said how they obtained the file.
+    # Run `scripts/audit_checkpoint.py` before trusting a re-download.
     Variant(
         name="protenix-v2",
         slug="v2",
-        url="https://protenix.tos-cn-beijing.volces.com/checkpoint/protenix-v2.pt",
+        url="https://huggingface.co/TMF001/protenix-v2-weights/resolve/main/protenix-v2.pt",
         published_params_m=464.44,
+        provenance="mirror",
+        expected_sha256=(
+            "8f931f9774a396b67033d0e58628e1834f4a1448165e04254b40a780b0c0d599"
+        ),
     ),
 )
 
