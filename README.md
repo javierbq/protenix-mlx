@@ -19,15 +19,40 @@ cache already speaks.
 | Packing + distribution (ZIP, digest, `WeightBundle`) | **working** |
 | Swift artifact loading + quantized/dense matrix layers | **working** |
 | Swift core layers, verified against PyTorch | **working** — Transition, AdaLN, AttentionPairBias, TriangleMultiplication ×2, TriangleAttention ×2, OuterProductMean, MSAPairWeightedAveraging |
-| Swift trunk stacks, verified against PyTorch | **working** — PairformerBlock (incl. `hidden_scale_up`), PairformerStack, MSAStack, MSABlock, MSAModule |
-| Swift template embedder, diffusion, confidence | **not yet implemented** |
-| Featurizer (MSA, templates, ligands) | **not yet implemented** |
+| Swift trunk (input embedder, relpos, MSA, Pairformer, recycling) | **working, verified** |
+| Swift diffusion (atom encoder/decoder, transformer, conditioning, sampler) | **working, verified** |
+| Swift end-to-end fold (sequence → coordinates → PDB) | **working** |
+| Confidence / distogram heads, templates, real MSA | not yet implemented |
 
-25 Swift tests, 49 Python tests. Packs can be built, verified, published, downloaded and
-loaded on device today, and the trunk's Pairformer and MSA paths reproduce upstream
-PyTorch to within 2e-4. **Nothing folds a sequence yet** — the template embedder,
-diffusion module, confidence head and the featurizer that feeds them are still to be
-written.
+**37 Swift tests, 49 Python tests.** Every learned component of the structure path —
+trunk and diffusion — reproduces upstream PyTorch to within 2e-4, verified by fixtures
+recorded from the real modules. **The port folds sequences end to end in Swift:** a
+feature bundle exported from Python (`export-features`) plus a model pack go in, atom
+coordinates come out (`predict`), written to a PDB. A 4-residue peptide folds with correct
+backbone bond lengths (N–CA ≈ 1.5 Å) in ~1 s on an M-series Mac through the int8 tiny pack.
+
+> Accuracy is bounded by what is wired up: single-sequence (no MSA search), no templates,
+> no confidence head. The tiny/mini v0.5.0 models at 5–20 diffusion steps produce
+> chemically sensible local geometry, not production-grade folds. The point proven here is
+> that the *network* runs faithfully in MLX Swift, not that this replaces a full Protenix
+> inference stack.
+
+### Folding a sequence
+
+```bash
+# 0. one-time: point at the CCD cache (components.cif + its rdkit pickle under common/)
+export PROTENIX_ROOT_DIR=/path/to/tree-with-common
+
+# 1. featurize a sequence (Python; runs upstream's featurizer, dummy MSA)
+protenix-mlx export-features --sequence GSHM --output bundles/GSHM
+
+# 2. fold it (Swift; trunk + diffusion sampler -> coordinates -> PDB)
+ProtenixMLXCLI predict --model artifacts/protenix-tiny-mlx-int8 \
+  --features bundles/GSHM --output GSHM.pdb
+```
+
+The split mirrors boltz-mlx: featurization (CCD tokenization, reference conformers,
+geometry) runs offline in Python; the network runs in Swift/MLX.
 
 ### Parity against PyTorch
 

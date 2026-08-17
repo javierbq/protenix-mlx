@@ -27,6 +27,11 @@ public struct ProtenixTrunk {
   /// runtime uses in production — every dimension comes from `config.json`.
   public init(store: WeightStore, cycleCount: Int) throws {
     let config = store.configuration.model
+    // Triangle attention's head count is NOT the block's attention head count. Upstream
+    // uses no_heads_pair, which defaults to 4 and becomes c_z / c_hidden_pair_att (32)
+    // only when hidden_scale_up is on (protenix-v2). Passing the 16 attention heads
+    // here builds triangle-bias tensors of the wrong width.
+    let pairHeads = config.pairformer.hiddenScaleUp ? config.pairformer.cZ / 32 : 4
     try self.init(
       store: store, cycleCount: cycleCount,
       inputEmbedderBlocks: config.diffusionModule.atomEncoder.nBlocks,
@@ -34,6 +39,7 @@ public struct ProtenixTrunk {
       msaBlocks: config.msaModule.nBlocks,
       pairformerBlocks: config.pairformer.nBlocks,
       pairformerHeads: config.pairformer.nHeads,
+      pairTriangleHeads: pairHeads,
       rMax: config.relativePositionEncoding.rMax,
       sMax: config.relativePositionEncoding.sMax)
   }
@@ -43,7 +49,7 @@ public struct ProtenixTrunk {
   public init(
     store: WeightStore, cycleCount: Int, inputEmbedderBlocks: Int,
     inputEmbedderHeads: Int, msaBlocks: Int, pairformerBlocks: Int,
-    pairformerHeads: Int, rMax: Int, sMax: Int
+    pairformerHeads: Int, pairTriangleHeads: Int, rMax: Int, sMax: Int
   ) throws {
     self.cycleCount = cycleCount
 
@@ -54,10 +60,10 @@ public struct ProtenixTrunk {
       store: store, path: "relative_position_encoding", rMax: rMax, sMax: sMax)
     msaModule = try MSAModule(
       store: store, path: "msa_module", blockCount: msaBlocks,
-      pairHeadCount: pairformerHeads, msaHeadCount: 8)
+      pairHeadCount: pairTriangleHeads, msaHeadCount: 8)
     pairformer = try PairformerStack(
       store: store, path: "pairformer_stack", blockCount: pairformerBlocks,
-      headCount: pairformerHeads, pairHeadCount: pairformerHeads)
+      headCount: pairformerHeads, pairHeadCount: pairTriangleHeads)
 
     linearSInit = try store.linear("linear_no_bias_sinit")
     linearZInit1 = try store.linear("linear_no_bias_zinit1")

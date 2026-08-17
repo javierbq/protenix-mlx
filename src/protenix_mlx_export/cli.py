@@ -100,6 +100,33 @@ def make_fixtures_command(output: Path, source: Path | None, seed: int) -> None:
     click.echo(f"wrote {len(written)} fixtures to {output}")
 
 
+@cli.command("export-features")
+@click.option("--sequence", required=True, help="A protein sequence (one chain).")
+@click.option("--output", type=click.Path(path_type=Path), required=True)
+@click.option("--name", default="prediction", show_default=True)
+@click.option(
+    "--source",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    help="A Protenix checkout, if not already importable.",
+)
+def export_features_command(
+    sequence: str, output: Path, name: str, source: Path | None
+) -> None:
+    """Featurize a sequence into a Swift-loadable feature bundle.
+
+    Needs upstream Protenix importable and the CCD cache reachable via
+    PROTENIX_ROOT_DIR (a tree with common/components.cif and its rdkit pickle).
+    Runs a single-sequence dummy MSA -- no alignment or templates.
+    """
+    from protenix_mlx_export.feature_export import export_features  # noqa: PLC0415
+
+    features = export_features(
+        sequence=sequence, output=output, name=name, source=source)
+    click.echo(
+        f"wrote {features.token_count} tokens / {features.atom_count} atoms to {output}")
+
+
 @cli.command("pack")
 @click.option(
     "--artifact",

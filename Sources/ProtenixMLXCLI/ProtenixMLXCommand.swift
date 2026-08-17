@@ -8,8 +8,51 @@ struct ProtenixMLXCommand: ParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "ProtenixMLXCLI",
     abstract: "Inspect and run Protenix MLX artifacts.",
-    subcommands: [Inspect.self]
+    subcommands: [Inspect.self, Predict.self]
   )
+}
+
+/// Fold a sequence: model artifact + feature bundle -> a PDB structure.
+struct Predict: ParsableCommand {
+  static let configuration = CommandConfiguration(
+    abstract: "Fold a feature bundle into coordinates and write a PDB.")
+
+  @Option(name: .long, help: "An exported model artifact directory.")
+  var model: String
+
+  @Option(name: .long, help: "A feature bundle from `export-features`.")
+  var features: String
+
+  @Option(name: .long, help: "Where to write the PDB.")
+  var output: String
+
+  @Option(name: .long, help: "Diffusion steps; defaults to the artifact's own.")
+  var diffusionSteps: Int?
+
+  @Option(name: .long, help: "RNG seed.")
+  var seed: Int = 0
+
+  func run() throws {
+    let artifact = try ProtenixArtifact.load(
+      from: URL(fileURLWithPath: model))
+    let bundle = try FeatureBundle.load(from: URL(fileURLWithPath: features))
+    let predictor = try ProtenixPredictor(artifact: artifact)
+
+    print("model        \(artifact.configuration.modelName)")
+    print("sequence     \(bundle.metadata.sequence)")
+    print("tokens/atoms \(bundle.metadata.tokenCount) / \(bundle.metadata.atomCount)")
+    print("recycling    \(predictor.recyclingSteps)")
+    print(
+      "diffusion    \(diffusionSteps ?? predictor.diffusionSteps) steps")
+
+    let coordinates = try predictor.fold(
+      bundle: bundle, seed: UInt64(seed), diffusionSteps: diffusionSteps)
+    let pdb = StructureWriter.pdb(
+      coordinates: coordinates, atoms: bundle.metadata.atoms)
+    try pdb.write(
+      to: URL(fileURLWithPath: output), atomically: true, encoding: .utf8)
+    print("\nwrote \(bundle.metadata.atomCount) atoms to \(output)")
+  }
 }
 
 /// Load a pack, validate it against its own manifest, and report what it holds.

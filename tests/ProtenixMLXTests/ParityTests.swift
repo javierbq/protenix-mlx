@@ -370,7 +370,7 @@ struct ParityTests {
     let trunk = try ProtenixTrunk(
       store: store, cycleCount: fixture.integer("n_cycle"),
       inputEmbedderBlocks: 3, inputEmbedderHeads: 4, msaBlocks: 1,
-      pairformerBlocks: 2, pairformerHeads: 4, rMax: 32, sMax: 2)
+      pairformerBlocks: 2, pairformerHeads: 4, pairTriangleHeads: 4, rMax: 32, sMax: 2)
 
     let features = AtomAttentionEncoder.Features(
       refPos: fixture.input("ref_pos"), refCharge: fixture.input("ref_charge"),
