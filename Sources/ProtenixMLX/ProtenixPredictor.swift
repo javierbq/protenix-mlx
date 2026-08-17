@@ -49,7 +49,18 @@ public struct ProtenixPredictor {
       atomDecoderHeads: model.diffusionModule.atomDecoder.nHeads,
       rMax: model.relativePositionEncoding.rMax,
       sMax: model.relativePositionEncoding.sMax)
-    sampler = DiffusionSampler(module: diffusion)
+    // From the artifact, NOT from the struct defaults. These constants are not weights
+    // and not derivable from them, so nothing in the parity suite covers them -- the
+    // sampler draws its own noise and therefore has no PyTorch fixture. Running with
+    // stepScaleEta 1.0 instead of upstream's 1.5 does not crash or produce garbage; it
+    // produces a plausible structure whose bonds are systematically ~10% short.
+    let diffusionConfig = config.sampleDiffusion
+    sampler = DiffusionSampler(
+      module: diffusion,
+      stepScaleEta: diffusionConfig?.stepScaleEta ?? 1.5,
+      gamma0: diffusionConfig?.gamma0 ?? 0.8,
+      gammaMin: diffusionConfig?.gammaMin ?? 1.0,
+      noiseScaleLambda: diffusionConfig?.noiseScaleLambda ?? 1.003)
 
     // Loaded only if the pack actually carries the weights. Every released pack does,
     // but a pack exported before the head was included would otherwise fail to load

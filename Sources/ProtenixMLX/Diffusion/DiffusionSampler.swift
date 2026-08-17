@@ -17,7 +17,7 @@ public struct DiffusionSampler {
   public let noiseScaleLambda: Float
 
   public init(
-    module: DiffusionModule, stepScaleEta: Float = 1.0, gamma0: Float = 0.0,
+    module: DiffusionModule, stepScaleEta: Float = 1.5, gamma0: Float = 0.8,
     gammaMin: Float = 1.0, noiseScaleLambda: Float = 1.003
   ) {
     self.module = module

@@ -301,4 +301,49 @@ struct WeightStoreTests {
       try weights.linear("absent")
     }
   }
+
+  @Test("the sampler's constants come from the pack, not from a struct default")
+  func samplerConstantsAreRead() throws {
+    // The bug this exists for: these four are NOT weights and not derivable from them,
+    // so no parity fixture covers them -- the sampler draws its own noise and cannot be
+    // bitwise-checked. Shipped with stepScaleEta 1.0 / gamma0 0.0 instead of upstream's
+    // 1.5 / 0.8, every fold came out with CA-CA distances at 3.27 A against an ideal
+    // 3.80, scattered 2.46-3.89. Nothing crashed and pLDDT still read 87.
+    let json = """
+      {"gamma0": 0.8, "gamma_min": 1.0, "noise_scale_lambda": 1.003,
+       "step_scale_eta": 1.5}
+      """
+    let section = try JSONDecoder().decode(
+      ProtenixModelConfiguration.SampleDiffusionSection.self, from: Data(json.utf8))
+    #expect(section.stepScaleEta == 1.5)
+    #expect(section.gamma0 == 0.8)
+    #expect(section.gammaMin == 1.0)
+    #expect(section.noiseScaleLambda == 1.003)
+  }
+
+  @Test("a pack that carries no sampler section still gets upstream's values")
+  func samplerDefaultsMatchUpstream() throws {
+    // Optional decoding is what keeps an older pack loadable, so the DEFAULTS are the
+    // fallback and must be upstream's rather than this runtime's opinion. A default that
+    // silently differs from the config it stands in for is the same bug wearing a hat.
+    let fixture = try Fixture.load("diffusion_module")
+    guard let fixture else {
+      print("SKIP sampler defaults: no diffusion_module fixture")
+      return
+    }
+    let module = try DiffusionModule(
+      store: fixture.store(rootedAt: "m"), path: "m", sigmaData: 16.0,
+      atomEncoderBlocks: fixture.integer("atom_encoder_blocks"),
+      atomEncoderHeads: fixture.integer("atom_encoder_heads"),
+      transformerBlocks: fixture.integer("transformer_blocks"),
+      transformerHeads: fixture.integer("transformer_heads"),
+      atomDecoderBlocks: fixture.integer("atom_decoder_blocks"),
+      atomDecoderHeads: fixture.integer("atom_decoder_heads"),
+      rMax: fixture.integer("r_max"), sMax: fixture.integer("s_max"))
+    let sampler = DiffusionSampler(module: module)
+    #expect(sampler.stepScaleEta == 1.5)
+    #expect(sampler.gamma0 == 0.8)
+    #expect(sampler.gammaMin == 1.0)
+    #expect(sampler.noiseScaleLambda == 1.003)
+  }
 }

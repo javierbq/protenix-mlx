@@ -34,6 +34,13 @@ public struct ProtenixModelConfiguration: Codable, Sendable, Equatable {
   public let nDiffusionSteps: Int
 
   public let model: ModelSection
+  /// The sampler's own constants. OPTIONAL so a pack exported before they were carried
+  /// still loads -- but a pack that omits them gets upstream's values, not this
+  /// runtime's guess, because the two silently differing is what this section is here to
+  /// prevent. See ``SampleDiffusionSection``.
+  public let sampleDiffusion: SampleDiffusionSection?
+  /// The noise schedule's constants, likewise optional.
+  public let inferenceNoiseScheduler: NoiseSchedulerSection?
   public let parameterCount: Int
   public let quantizedMatrixCount: Int
   public let graphRoots: [String]
@@ -52,9 +59,54 @@ public struct ProtenixModelConfiguration: Codable, Sendable, Equatable {
     case nCycle = "n_cycle"
     case nDiffusionSteps = "n_diffusion_steps"
     case model
+    case sampleDiffusion = "sample_diffusion"
+    case inferenceNoiseScheduler = "inference_noise_scheduler"
     case parameterCount = "parameter_count"
     case quantizedMatrixCount = "quantized_matrix_count"
     case graphRoots = "graph_roots"
+  }
+
+  /// The sampler constants from upstream's `sample_diffusion` config.
+  ///
+  /// These are NOT weights and NOT derivable from them, which is what makes them
+  /// dangerous: the parity suite cannot catch a wrong one. Every learned module is
+  /// checked against a recorded PyTorch fixture, but the sampler draws its own noise, so
+  /// it has no fixture — and a wrong `stepScaleEta` does not crash or produce garbage. It
+  /// produces a plausible-looking structure with systematically compressed bonds, which
+  /// is exactly how this was found: CA-CA distances came out at 3.4 A against an ideal
+  /// 3.8 after the port ran with the struct defaults (1.0 / 0.0) rather than upstream's.
+  public struct SampleDiffusionSection: Codable, Sendable, Equatable {
+    /// Churn: how much noise is re-injected before each Euler step. 0.8 upstream; at 0
+    /// the sampler is deterministic-descent and under-converges.
+    public let gamma0: Float
+    /// Churn applies only above this noise level.
+    public let gammaMin: Float
+    /// Scales the re-injected noise.
+    public let noiseScaleLambda: Float
+    /// Scales the Euler step. 1.5 upstream; at 1.0 every step under-shoots.
+    public let stepScaleEta: Float
+
+    private enum CodingKeys: String, CodingKey {
+      case gamma0
+      case gammaMin = "gamma_min"
+      case noiseScaleLambda = "noise_scale_lambda"
+      case stepScaleEta = "step_scale_eta"
+    }
+  }
+
+  /// The EDM noise schedule's constants, from upstream's `inference_noise_scheduler`.
+  public struct NoiseSchedulerSection: Codable, Sendable, Equatable {
+    public let rho: Float
+    public let sMax: Float
+    public let sMin: Float
+    public let sigmaData: Float
+
+    private enum CodingKeys: String, CodingKey {
+      case rho
+      case sMax = "s_max"
+      case sMin = "s_min"
+      case sigmaData = "sigma_data"
+    }
   }
 
   /// Upstream's `configs.model` subtree, narrowed to what inference reads.
