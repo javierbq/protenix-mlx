@@ -360,6 +360,34 @@ struct ParityTests {
     #expect(bias.min().item(Float.self) < -1e9)
   }
 
+  @Test("trunk recycling matches upstream (s_inputs, s, z)")
+  func trunk() throws {
+    guard let fixture = try fixture("trunk") else { return }
+    let store = try fixture.store(rootedAt: "")
+    // The fixture carries no full config, so the trunk is built with the small dims
+    // its container used (input embedder 3 atom blocks / 4 heads, msa 1 block,
+    // pairformer 2 blocks / 4 heads).
+    let trunk = try ProtenixTrunk(
+      store: store, cycleCount: fixture.integer("n_cycle"),
+      inputEmbedderBlocks: 3, inputEmbedderHeads: 4, msaBlocks: 1,
+      pairformerBlocks: 2, pairformerHeads: 4, rMax: 32, sMax: 2)
+
+    let features = AtomAttentionEncoder.Features(
+      refPos: fixture.input("ref_pos"), refCharge: fixture.input("ref_charge"),
+      refMask: fixture.input("ref_mask"), refElement: fixture.input("ref_element"),
+      refAtomNameChars: fixture.input("ref_atom_name_chars"),
+      atomToToken: fixture.input("atom_to_token_idx"), dLM: fixture.input("d_lm"),
+      vLM: fixture.input("v_lm"), maskTrunked: fixture.input("mask_trunked"))
+    let output = trunk(
+      atomFeatures: features, restype: fixture.input("restype"),
+      profile: fixture.input("profile"), deletionMean: fixture.input("deletion_mean"),
+      relativeFeatures: fixture.input("relp"), tokenBonds: fixture.input("token_bonds"),
+      msaFeatures: fixture.input("msa_features"), tokenCount: fixture.integer("n_tokens"))
+    #expect(maximumDeviation(output.sInputs, fixture.tensors["output.s_inputs"]!) < tolerance)
+    #expect(maximumDeviation(output.s, fixture.tensors["output.s"]!) < tolerance)
+    #expect(maximumDeviation(output.z, fixture.tensors["output.z"]!) < tolerance)
+  }
+
   @Test("diffusion module denoise step matches upstream end to end")
   func diffusionModule() throws {
     guard let fixture = try fixture("diffusion_module") else { return }

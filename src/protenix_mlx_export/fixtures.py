@@ -454,6 +454,12 @@ def _cases() -> list[FixtureCase]:
             run=_run_atom_encoder,
         ),
         FixtureCase(
+            name="trunk",
+            build=_build_trunk,
+            config={"n_cycle": 2, "c_s": c_s, "c_z": c_z, "n_tokens": n_tokens},
+            run=_run_trunk,
+        ),
+        FixtureCase(
             name="diffusion_module",
             build=_build_diffusion_module,
             config={
@@ -608,6 +614,147 @@ def _build_atom_decoder():
         ),
     }
     return module, inputs
+
+
+def _build_trunk():
+    """A trunk container matching ProtenixTrunk, plus one set of inputs.
+
+    Assembles the real upstream sub-modules under the attribute names the Swift port
+    loads from, and runs the exact `get_pairformer_output` recycling -- but drives the
+    MSA path through an explicit embed rather than the random row sampler, so the
+    fixture is deterministic and matches what the feature bundle would carry.
+    """
+    import torch.nn as nn
+
+    from protenix.model.modules.embedders import (
+        InputFeatureEmbedder,
+        RelativePositionEncoding,
+    )
+    from protenix.model.modules.pairformer import MSAModule, PairformerStack
+    from protenix.model.modules.primitives import LinearNoBias
+    from protenix.model.triangular.layers import LayerNorm
+
+    c_z, c_s = SMALL["c_z"], SMALL["c_s"]
+    c_atom, c_atompair = SMALL["c_a"], SMALL["c_atompair"]
+    c_token = SMALL["c_s"]
+    c_s_inputs = c_token + 32 + 32 + 1
+    c_m = 16
+    n_tokens, n_seq, n_atoms = SMALL["n_tokens"], SMALL["n_seq"], SMALL["n_atoms"]
+    heads = SMALL["n_heads"]
+    r_max, s_max = 32, 2
+
+    class Trunk(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.input_embedder = InputFeatureEmbedder(
+                c_atom=c_atom, c_atompair=c_atompair, c_token=c_token)
+            self.relative_position_encoding = RelativePositionEncoding(
+                r_max=r_max, s_max=s_max, c_z=c_z)
+            self.msa_module = MSAModule(
+                n_blocks=1, c_m=c_m, c_z=c_z, c_s_inputs=c_s_inputs,
+                msa_dropout=0.0, pair_dropout=0.0, msa_configs={})
+            self.pairformer_stack = PairformerStack(
+                n_blocks=2, n_heads=heads, c_z=c_z, c_s=c_s, dropout=0.0)
+            self.linear_no_bias_sinit = LinearNoBias(c_s_inputs, c_s)
+            self.linear_no_bias_zinit1 = LinearNoBias(c_s, c_z)
+            self.linear_no_bias_zinit2 = LinearNoBias(c_s, c_z)
+            self.linear_no_bias_token_bond = LinearNoBias(1, c_z)
+            self.linear_no_bias_z_cycle = LinearNoBias(c_z, c_z)
+            self.linear_no_bias_s = LinearNoBias(c_s, c_s)
+            self.layernorm_z_cycle = LayerNorm(c_z)
+            self.layernorm_s = LayerNorm(c_s)
+            self.n_cycle = 2
+
+        def forward(self, feature_dict, msa_features, token_bonds):
+            s_inputs = self.input_embedder(feature_dict)
+            s_init = self.linear_no_bias_sinit(s_inputs)
+            z_init = (
+                self.linear_no_bias_zinit1(s_init)[..., None, :]
+                + self.linear_no_bias_zinit2(s_init)[..., None, :, :]
+            )
+            z_init = z_init + self.relative_position_encoding(feature_dict["relp"])
+            z_init = z_init + self.linear_no_bias_token_bond(
+                token_bonds.unsqueeze(dim=-1)
+            )
+            z = torch.zeros_like(z_init)
+            s = torch.zeros_like(s_init)
+            for _ in range(self.n_cycle):
+                z = z_init + self.linear_no_bias_z_cycle(self.layernorm_z_cycle(z))
+                m = self.msa_module.linear_no_bias_m(
+                    msa_features
+                ) + self.msa_module.linear_no_bias_s(s_inputs)
+                for block in self.msa_module.blocks:
+                    updated, z = block(m, z, pair_mask=None)
+                    if updated is not None:
+                        m = updated
+                s = s_init + self.linear_no_bias_s(self.layernorm_s(s))
+                s, z = self.pairformer_stack(s, z, pair_mask=None)
+            return {"s_inputs": s_inputs, "s": s, "z": z}
+
+    module = Trunk()
+    generator = torch.Generator().manual_seed(23)
+    atom_to_token, feats = _atom_features(n_atoms, n_tokens, c_z, c_s, c_atom)
+
+    relpe = RelativePositionEncoding(c_z=c_z)
+    ids = torch.arange(n_tokens)
+    fd = {
+        "asym_id": torch.zeros(1, n_tokens, dtype=torch.long),
+        "residue_index": ids.reshape(1, n_tokens).long(),
+        "entity_id": torch.zeros(1, n_tokens, dtype=torch.long),
+        "token_index": ids.reshape(1, n_tokens).long(),
+        "sym_id": torch.zeros(1, n_tokens, dtype=torch.long),
+    }
+    relpe.generate_relp(fd)
+
+    # one-hot MSA + deletion features -> [S, N, 34], as the bundle would carry.
+    msa_indices = torch.randint(0, 32, (n_seq, n_tokens), generator=generator)
+    msa_onehot = torch.nn.functional.one_hot(msa_indices, 32).float()
+    has_deletion = torch.rand(n_seq, n_tokens, 1, generator=generator)
+    deletion_value = torch.rand(n_seq, n_tokens, 1, generator=generator)
+    msa_features = torch.cat([msa_onehot, has_deletion, deletion_value], dim=-1)
+
+    feature_dict = {
+        "atom_to_token_idx": atom_to_token,
+        "ref_pos": feats["ref_pos"],
+        "ref_charge": torch.randn(1, n_atoms, generator=generator),
+        "ref_mask": torch.ones(1, n_atoms),
+        "ref_element": torch.randn(1, n_atoms, 128, generator=generator),
+        "ref_atom_name_chars": torch.randn(1, n_atoms, 4 * 64, generator=generator),
+        "d_lm": feats["d_lm"],
+        "v_lm": feats["v_lm"],
+        "pad_info": feats["pad_info"],
+        "relp": fd["relp"],
+        "restype": torch.randn(1, n_tokens, 32, generator=generator),
+        "profile": torch.randn(1, n_tokens, 32, generator=generator),
+        "deletion_mean": torch.randn(1, n_tokens, 1, generator=generator),
+    }
+    token_bonds = torch.zeros(1, n_tokens, n_tokens)
+
+    module._feature_dict = feature_dict
+    module._msa_features = msa_features
+    module._token_bonds = token_bonds
+    inputs = {
+        "atom_to_token_idx": atom_to_token,
+        "ref_pos": feature_dict["ref_pos"],
+        "ref_charge": feature_dict["ref_charge"],
+        "ref_mask": feature_dict["ref_mask"],
+        "ref_element": feature_dict["ref_element"],
+        "ref_atom_name_chars": feature_dict["ref_atom_name_chars"],
+        "d_lm": feature_dict["d_lm"],
+        "v_lm": feature_dict["v_lm"].float(),
+        "mask_trunked": feats["pad_info"]["mask_trunked"].float(),
+        "relp": fd["relp"],
+        "restype": feature_dict["restype"],
+        "profile": feature_dict["profile"],
+        "deletion_mean": feature_dict["deletion_mean"],
+        "msa_features": msa_features,
+        "token_bonds": token_bonds,
+    }
+    return module, inputs
+
+
+def _run_trunk(module: Any, inputs: dict) -> dict:
+    return module(module._feature_dict, module._msa_features, module._token_bonds)
 
 
 def _build_diffusion_module():
@@ -834,6 +981,7 @@ def case_names() -> tuple[str, ...]:
         "pairformer_block_scale_up",
         "pairformer_stack",
         "transition",
+        "trunk",
         "triangle_attention_ending",
         "triangle_attention_starting",
         "triangle_multiplication_incoming",
