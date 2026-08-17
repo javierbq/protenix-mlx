@@ -45,6 +45,12 @@ SMALL = {
     "n_tokens": 7,
     "n_seq": 5,
     "c_noise": 16,
+    "c_atompair": 8,
+    # Windows small enough for a quick fixture but with the same even/ordering
+    # constraints upstream asserts; n_atoms is not a multiple of n_queries on purpose.
+    "n_queries": 4,
+    "n_keys": 8,
+    "n_atoms": 11,
 }
 
 
@@ -228,6 +234,7 @@ def _cases() -> list[FixtureCase]:
         DiffusionConditioning,
     )
     from protenix.model.modules.transformer import (  # noqa: PLC0415
+        AtomTransformer,
         ConditionedTransitionBlock,
         DiffusionTransformer,
         DiffusionTransformerBlock,
@@ -402,6 +409,40 @@ def _cases() -> list[FixtureCase]:
             run=lambda module, inputs: _run_conditioning(module, inputs),
         ),
         FixtureCase(
+            # n_atoms deliberately NOT a multiple of n_queries, so the query tail is
+            # padded and the window mask has to be right at both ends.
+            name="atom_transformer",
+            build=lambda: (
+                AtomTransformer(
+                    c_atom=c_a,
+                    c_atompair=SMALL["c_atompair"],
+                    n_blocks=2,
+                    n_heads=n_heads,
+                    n_queries=SMALL["n_queries"],
+                    n_keys=SMALL["n_keys"],
+                ),
+                {
+                    "q": torch.randn(1, SMALL["n_atoms"], c_a),
+                    "c": torch.randn(1, SMALL["n_atoms"], c_a),
+                    "p": torch.randn(
+                        1,
+                        -(-SMALL["n_atoms"] // SMALL["n_queries"]),
+                        SMALL["n_queries"],
+                        SMALL["n_keys"],
+                        SMALL["c_atompair"],
+                    ),
+                },
+            ),
+            config={
+                "c_atom": c_a, "c_atompair": SMALL["c_atompair"], "n_blocks": 2,
+                "n_heads": n_heads, "n_queries": SMALL["n_queries"],
+                "n_keys": SMALL["n_keys"], "n_atoms": SMALL["n_atoms"],
+            },
+            run=lambda module, inputs: module(
+                q=inputs["q"], c=inputs["c"], p=inputs["p"]
+            ),
+        ),
+        FixtureCase(
             # Three blocks, so an error in how blocks are chained (feeding the wrong
             # tensor forward, or reusing block 0's weights) cannot hide.
             name="pairformer_stack",
@@ -551,6 +592,7 @@ def case_names() -> tuple[str, ...]:
     return (
         "adaptive_layernorm",
         "attention_pair_bias_no_s",
+        "atom_transformer",
         "attention_pair_bias_with_s",
         "conditioned_transition_block",
         "diffusion_conditioning",

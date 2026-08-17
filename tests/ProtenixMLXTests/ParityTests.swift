@@ -325,6 +325,41 @@ struct ParityTests {
     #expect(maximumDeviation(single, fixture.tensors["output.single"]!) < tolerance)
   }
 
+  @Test("atom transformer matches upstream under windowed attention")
+  func atomTransformer() throws {
+    guard let fixture = try fixture("atom_transformer") else { return }
+    let transformer = try AtomTransformer(
+      store: fixture.store(rootedAt: "m"), path: "m",
+      blockCount: fixture.integer("n_blocks"),
+      headCount: fixture.integer("n_heads"),
+      queryWindow: fixture.integer("n_queries"),
+      keyWindow: fixture.integer("n_keys"))
+    let output = transformer(
+      fixture.input("q"), fixture.input("c"), fixture.input("p"))
+    #expect(output.shape == fixture.expected.shape)
+    #expect(maximumDeviation(output, fixture.expected) < tolerance)
+  }
+
+  @Test("local attention window geometry matches upstream's padding arithmetic")
+  func localAttentionGeometry() {
+    // Upstream's production setting. The right pad is the fiddly one -- it is written
+    // with halves and has to come out exact.
+    let trunking = LocalAttention.Trunking(
+      atomCount: 100, queryWindow: 32, keyWindow: 128)
+    #expect(trunking.trunkCount == 4)
+    #expect(trunking.queryPadding == 28)
+    #expect(trunking.keyPadLeft == 48)
+    // (n_trunks - 1/2)*32 + 64 - 100 + 1/2 = 112 + 64 - 100 = 76
+    #expect(trunking.keyPadRight == 76)
+
+    // A fully-padded query row must not produce NaN: the mask uses a large finite
+    // negative rather than -infinity precisely so softmax stays defined.
+    let bias = LocalAttention.windowBias(trunking)
+    #expect(bias.shape == [4, 32, 128])
+    #expect(bias.max().item(Float.self) == 0)
+    #expect(bias.min().item(Float.self) < -1e9)
+  }
+
   @Test("outer product mean matches upstream")
   func outerProductMean() throws {
     guard let fixture = try fixture("outer_product_mean") else { return }
