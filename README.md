@@ -22,37 +22,74 @@ cache already speaks.
 | Swift trunk (input embedder, relpos, MSA, Pairformer, recycling) | **working, verified** |
 | Swift diffusion (atom encoder/decoder, transformer, conditioning, sampler) | **working, verified** |
 | Swift end-to-end fold (sequence → coordinates → PDB) | **working** |
-| Confidence / distogram heads, templates, real MSA | not yet implemented |
+| Swift featurizer (canonical-20 protein, multi-chain) | **working** — bitwise-identical to upstream's data pipeline |
+| Swift confidence head (pLDDT / PAE / PDE / resolved) | **working, verified** |
+| Distogram head, templates, real MSA, ligands, nucleic acids | not implemented |
 
-**37 Swift tests, 49 Python tests.** Every learned component of the structure path —
-trunk and diffusion — reproduces upstream PyTorch to within 2e-4, verified by fixtures
-recorded from the real modules. **The port folds sequences end to end in Swift:** a
-feature bundle exported from Python (`export-features`) plus a model pack go in, atom
-coordinates come out (`predict`), written to a PDB. A 4-residue peptide folds with correct
-backbone bond lengths (N–CA ≈ 1.5 Å) in ~1 s on an M-series Mac through the int8 tiny pack.
+**50 Swift tests, 92 Python tests.** Every learned component of the structure path —
+trunk, diffusion and the confidence head — reproduces upstream PyTorch to within 2e-4,
+verified by fixtures recorded from the real modules.
 
-> Accuracy is bounded by what is wired up: single-sequence (no MSA search), no templates,
-> no confidence head. The tiny/mini v0.5.0 models at 5–20 diffusion steps produce
-> chemically sensible local geometry, not production-grade folds. The point proven here is
-> that the *network* runs faithfully in MLX Swift, not that this replaces a full Protenix
+**A fold needs nothing but a sequence and a pack.** Featurization runs in Swift, so
+there is no Python, no torch, no rdkit and no 624 MB `components.cif` on the machine
+doing the fold — for the canonical 20, everything upstream looks up in the CCD is a
+constant, and those constants ship in the package (~90 KB). A 4-residue peptide folds
+with correct backbone bond lengths (N–CA ≈ 1.5 Å) in ~1 s on an M-series Mac through the
+int8 tiny pack.
+
+> Accuracy is bounded by what is wired up: single-sequence (no MSA search) and no
+> templates. The tiny/mini v0.5.0 models at 5–20 diffusion steps produce chemically
+> sensible local geometry, not production-grade folds. The point proven here is that the
+> *network* runs faithfully in MLX Swift, not that this replaces a full Protenix
 > inference stack.
 
 ### Folding a sequence
 
 ```bash
-# 0. one-time: point at the CCD cache (components.cif + its rdkit pickle under common/)
-export PROTENIX_ROOT_DIR=/path/to/tree-with-common
+# Fold, and score the fold. Nothing but the pack is required.
+ProtenixMLXCLI predict --model artifacts/protenix-base-mlx-int8 \
+  --sequence GSHM --output GSHM.pdb --confidence
 
-# 1. featurize a sequence (Python; runs upstream's featurizer, dummy MSA)
+# A complex: separate chains with "/". Identical sequences fold as copies of one
+# entity, which is what tells the model a homodimer's chains are related.
+ProtenixMLXCLI predict --model artifacts/protenix-base-mlx-int8 \
+  --sequence "GSHM/GSHM" --output dimer.pdb
+```
+
+`--confidence` runs the confidence head and writes per-atom pLDDT into the B-factor
+column, which is what viewers colour by. Without it the column is `0.00` rather than a
+fabricated value.
+
+The Python featurizer is still there for inputs the table cannot serve — anything that
+genuinely needs the CCD — and is what the Swift featurizer is tested against:
+
+```bash
+export PROTENIX_ROOT_DIR=/path/to/tree-with-common   # components.cif + its rdkit pickle
 protenix-mlx export-features --sequence GSHM --output bundles/GSHM
-
-# 2. fold it (Swift; trunk + diffusion sampler -> coordinates -> PDB)
 ProtenixMLXCLI predict --model artifacts/protenix-tiny-mlx-int8 \
   --features bundles/GSHM --output GSHM.pdb
 ```
 
-The split mirrors boltz-mlx: featurization (CCD tokenization, reference conformers,
-geometry) runs offline in Python; the network runs in Swift/MLX.
+Both paths produce byte-identical structures for a canonical-20 protein. The bundle it
+writes is now a function of its sequences alone: upstream applies a random rotation and
+translation to every reference conformer from the global numpy RNG, which makes a fold
+irreproducible even at a fixed diffusion seed, so that augmentation is off by default
+here (`--augment` restores it, `--seed` makes even that reproducible).
+
+### The residue table
+
+`protenix-mlx export-residue-templates` freezes the canonical-20 reference conformers
+into `Sources/ProtenixMLX/Resources/residue_templates.json`. It **derives** the table by
+running upstream's own featurizer and slicing per residue — never by reimplementing the
+CCD lookup — and refuses to write one unless two properties hold, both checked rather
+than assumed:
+
+- a residue's conformer does not depend on its neighbours (built in several sequence
+  contexts, required to agree bitwise);
+- position changes a residue in exactly one way, the C-terminal `OXT`.
+
+Coordinates are stored already centred, so `ref_pos` is a copy rather than a sum and the
+Swift featurizer agrees with Python *bitwise* rather than within a tolerance.
 
 ### Parity against PyTorch
 
@@ -72,6 +109,13 @@ Two properties this harness is built to have:
 Verified by mutation: swapping the outgoing/incoming permutation in
 `TriangleMultiplication` — the subtlest line in the port — moves the deviation from below
 2e-4 to 1.09, and the corresponding test fails by name.
+
+The featurizer has no PyTorch module to imitate, so it is checked differently: bundles
+exported by the real upstream pipeline (`scripts/build_feature_fixtures.sh`) are compared
+**exactly**, all 17 tensors, over single chains, every canonical residue, both atom-window
+boundaries, hetero- and homodimers and a trimer. Also mutation-verified — dropping the
+C-terminal `OXT`, forgetting that equal residue indices in different chains are different
+residues, and an off-by-one in the atom window each fail by name.
 
 Upstream imports with torch alone provided `LAYERNORM_TYPE` is set to anything other than
 `fast_layernorm`; the default tries to build a CUDA extension. `fixtures.py` sets it
