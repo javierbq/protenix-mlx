@@ -76,6 +76,30 @@ def export_model_command(
     )
 
 
+@cli.command("make-fixtures")
+@click.option("--output", type=click.Path(path_type=Path), required=True)
+@click.option(
+    "--source",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    help="Path to a Protenix checkout. Needed unless it is already importable.",
+)
+@click.option("--seed", type=int, default=0, show_default=True)
+def make_fixtures_command(output: Path, source: Path | None, seed: int) -> None:
+    """Record PyTorch module-boundary fixtures for the Swift parity tests.
+
+    Needs upstream's runtime dependencies (torch, scipy, rdkit, biotite). The Swift
+    tests skip loudly when the fixture tree is absent, so this is only required when
+    changing a layer.
+    """
+    from protenix_mlx_export.fixtures import make_fixtures  # noqa: PLC0415
+
+    written = make_fixtures(output=output, source=source, seed=seed)
+    for path in written:
+        click.echo(f"  {path.name}")
+    click.echo(f"wrote {len(written)} fixtures to {output}")
+
+
 @cli.command("pack")
 @click.option(
     "--artifact",

@@ -17,13 +17,38 @@ cache already speaks.
 | Python exporter (int8 / fp16 / bf16) | **working, verified against real checkpoints** |
 | Artifact schema, manifest, config contract | **working** |
 | Packing + distribution (ZIP, digest, `WeightBundle`) | **working** |
-| Swift artifact loading + quantized/dense matrix layers | **working, 13 tests** |
-| Swift forward graph (Pairformer, MSA, diffusion, confidence) | **not yet implemented** |
+| Swift artifact loading + quantized/dense matrix layers | **working** |
+| Swift core layers, verified against PyTorch | **working** — Transition, AdaLN, AttentionPairBias, TriangleMultiplication ×2, TriangleAttention ×2, OuterProductMean |
+| Swift stacks (Pairformer, MSA, template, diffusion, confidence) | **not yet implemented** |
 | Featurizer (MSA, templates, ligands) | **not yet implemented** |
 
-So: packs can be built, verified, published, downloaded and loaded on device today, and
-individual matrices run. **Nothing folds a sequence yet** — the trunk and diffusion
-modules are still to be written.
+20 Swift tests, 49 Python tests. Packs can be built, verified, published, downloaded and
+loaded on device today, and the core layers reproduce upstream PyTorch to within 2e-4.
+**Nothing folds a sequence yet** — the layers exist but the stacks that compose them, and
+the featurizer that feeds them, are still to be written.
+
+### Parity against PyTorch
+
+A port of a 464M-parameter network cannot be validated by reading it. `protenix-mlx
+make-fixtures` instantiates each upstream module at small dimensions with seeded random
+weights, runs it, and records weights/inputs/outputs; the Swift tests replay the same
+weights and inputs and assert the same outputs to within 2e-4.
+
+Two properties this harness is built to have:
+
+- **Fixtures reproduce bit-identically from their seed**, so a stale tree cannot drift
+  into agreement.
+- **Missing fixtures skip loudly**, printing `SKIP` per case rather than reporting green.
+  A parity suite that silently passes when its reference data is absent is worse than no
+  suite at all.
+
+Verified by mutation: swapping the outgoing/incoming permutation in
+`TriangleMultiplication` — the subtlest line in the port — moves the deviation from below
+2e-4 to 1.09, and the corresponding test fails by name.
+
+Upstream imports with torch alone provided `LAYERNORM_TYPE` is set to anything other than
+`fast_layernorm`; the default tries to build a CUDA extension. `fixtures.py` sets it
+automatically.
 
 ## Models
 
