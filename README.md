@@ -18,14 +18,16 @@ cache already speaks.
 | Artifact schema, manifest, config contract | **working** |
 | Packing + distribution (ZIP, digest, `WeightBundle`) | **working** |
 | Swift artifact loading + quantized/dense matrix layers | **working** |
-| Swift core layers, verified against PyTorch | **working** — Transition, AdaLN, AttentionPairBias, TriangleMultiplication ×2, TriangleAttention ×2, OuterProductMean |
-| Swift stacks (Pairformer, MSA, template, diffusion, confidence) | **not yet implemented** |
+| Swift core layers, verified against PyTorch | **working** — Transition, AdaLN, AttentionPairBias, TriangleMultiplication ×2, TriangleAttention ×2, OuterProductMean, MSAPairWeightedAveraging |
+| Swift trunk stacks, verified against PyTorch | **working** — PairformerBlock (incl. `hidden_scale_up`), PairformerStack, MSAStack, MSABlock, MSAModule |
+| Swift template embedder, diffusion, confidence | **not yet implemented** |
 | Featurizer (MSA, templates, ligands) | **not yet implemented** |
 
-20 Swift tests, 49 Python tests. Packs can be built, verified, published, downloaded and
-loaded on device today, and the core layers reproduce upstream PyTorch to within 2e-4.
-**Nothing folds a sequence yet** — the layers exist but the stacks that compose them, and
-the featurizer that feeds them, are still to be written.
+25 Swift tests, 49 Python tests. Packs can be built, verified, published, downloaded and
+loaded on device today, and the trunk's Pairformer and MSA paths reproduce upstream
+PyTorch to within 2e-4. **Nothing folds a sequence yet** — the template embedder,
+diffusion module, confidence head and the featurizer that feeds them are still to be
+written.
 
 ### Parity against PyTorch
 

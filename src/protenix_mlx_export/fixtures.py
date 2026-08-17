@@ -222,7 +222,152 @@ def _cases() -> list[FixtureCase]:
             run=lambda module, inputs: module(inputs["m"], mask=None),
         ),
     ]
+
+    from protenix.model.modules.pairformer import (  # noqa: PLC0415
+        MSAModule,
+        MSAPairWeightedAveraging,
+        MSAStack,
+        PairformerBlock,
+        PairformerStack,
+    )
+
+    # `c_hidden_pair_att` must divide c_z when hidden_scale_up is on, because upstream
+    # derives the head count as c_z // c_hidden_pair_att.
+    pair_attention_width = c_z // SMALL["n_heads"]
+
+    def pairformer_kwargs(*, scale_up: bool) -> dict[str, Any]:
+        return {
+            "n_heads": SMALL["n_heads"],
+            "c_z": c_z,
+            "c_s": c_s,
+            "c_hidden_mul": c_hidden,
+            "c_hidden_pair_att": pair_attention_width,
+            "no_heads_pair": SMALL["n_heads"],
+            "dropout": 0.0,
+            "hidden_scale_up": scale_up,
+        }
+
+    cases += [
+        FixtureCase(
+            name="pairformer_block",
+            build=lambda: (
+                PairformerBlock(**pairformer_kwargs(scale_up=False)),
+                {"s": single(c_s), "z": pair()},
+            ),
+            config={
+                **pairformer_kwargs(scale_up=False),
+                "pair_head_count": SMALL["n_heads"],
+            },
+            run=lambda module, inputs: module(
+                s=inputs["s"], z=inputs["z"], pair_mask=None
+            ),
+        ),
+        FixtureCase(
+            # protenix-v2 turns this on, which changes the hidden widths and the
+            # pair-attention head count -- i.e. the weight SHAPES, not just a constant.
+            name="pairformer_block_scale_up",
+            build=lambda: (
+                PairformerBlock(**pairformer_kwargs(scale_up=True)),
+                {"s": single(c_s), "z": pair()},
+            ),
+            config={
+                **pairformer_kwargs(scale_up=True),
+                "pair_head_count": c_z // pair_attention_width,
+            },
+            run=lambda module, inputs: module(
+                s=inputs["s"], z=inputs["z"], pair_mask=None
+            ),
+        ),
+        FixtureCase(
+            name="msa_pair_weighted_averaging",
+            build=lambda: (
+                MSAPairWeightedAveraging(
+                    c_m=c_s, c=c_hidden, c_z=c_z, n_heads=SMALL["n_heads"]
+                ),
+                {"m": torch.randn(1, n_seq, n_tokens, c_s), "z": pair()},
+            ),
+            config={
+                "c_m": c_s, "c": c_hidden, "c_z": c_z, "n_heads": SMALL["n_heads"],
+            },
+            run=lambda module, inputs: module(m=inputs["m"], z=inputs["z"]),
+        ),
+        FixtureCase(
+            name="msa_stack",
+            build=lambda: (
+                MSAStack(c_m=c_s, c_z=c_z, c=c_hidden, dropout=0.0),
+                {"m": torch.randn(1, n_seq, n_tokens, c_s), "z": pair()},
+            ),
+            # MSAStack hard-codes MSAPairWeightedAveraging's default 8 heads.
+            config={"c_m": c_s, "c_z": c_z, "c": c_hidden, "n_heads": 8},
+            run=lambda module, inputs: module(m=inputs["m"], z=inputs["z"]),
+        ),
+        FixtureCase(
+            # Two blocks so the last-block special case (no MSA stack) is exercised
+            # alongside a normal one.
+            name="msa_module",
+            build=lambda: (
+                MSAModule(
+                    n_blocks=2,
+                    c_m=c_s,
+                    c_z=c_z,
+                    c_s_inputs=c_s,
+                    msa_dropout=0.0,
+                    pair_dropout=0.0,
+                    msa_configs={},
+                ),
+                {"m": torch.randn(1, n_seq, n_tokens, c_s), "z": pair()},
+            ),
+            config={
+                "n_blocks": 2, "c_m": c_s, "c_z": c_z, "c_s_inputs": c_s,
+                "pair_head_count": 4, "msa_head_count": 8,
+            },
+            # Driven at the block level rather than through MSAModule.forward, which
+            # builds `m` from raw MSA features -- that is featurizer work, not trunk
+            # work, and is not ported yet.
+            run=lambda module, inputs: _run_msa_blocks(
+                module, inputs["m"], inputs["z"]
+            ),
+        ),
+        FixtureCase(
+            # Three blocks, so an error in how blocks are chained (feeding the wrong
+            # tensor forward, or reusing block 0's weights) cannot hide.
+            name="pairformer_stack",
+            build=lambda: (
+                PairformerStack(
+                    n_blocks=3,
+                    n_heads=SMALL["n_heads"],
+                    c_z=c_z,
+                    c_s=c_s,
+                    dropout=0.0,
+                ),
+                {"s": single(c_s), "z": pair()},
+            ),
+            config={
+                "n_blocks": 3,
+                "n_heads": SMALL["n_heads"],
+                "c_z": c_z,
+                "c_s": c_s,
+                # PairformerStack does not forward c_hidden_pair_att, so its blocks use
+                # the upstream default of 32 with 4 heads.
+                "pair_head_count": 4,
+            },
+            run=lambda module, inputs: module(
+                s=inputs["s"], z=inputs["z"], pair_mask=None
+            ),
+        ),
+    ]
     return cases
+
+
+def _run_msa_blocks(module: Any, m: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+    """Run an MSAModule's blocks directly, bypassing raw-feature embedding."""
+    pair = z
+    msa = m
+    for block in module.blocks:
+        updated, pair = block(msa, pair, pair_mask=None)
+        if updated is not None:
+            msa = updated
+    return pair
 
 
 def _as_tensor_map(value: Any, prefix: str) -> dict[str, torch.Tensor]:
@@ -240,15 +385,27 @@ def write_fixture(case: FixtureCase, *, output: Path, seed: int = 0) -> Path:
     module, inputs = case.build()
     _randomize(module, seed=seed + 1)
 
+    # Snapshot the inputs BEFORE running. Several upstream modules mutate their input
+    # in place at inference -- `MSAStack.inference_forward` does `m[start:end] += ...`
+    # to bound memory -- so recording `inputs` afterwards would save the OUTPUT under
+    # the input's name. The fixture would then ask the port to reproduce f(x) from
+    # f(x), which no correct implementation can do.
+    recorded = {name: value.detach().clone() for name, value in inputs.items()}
+
     with torch.no_grad():
         result = case.run(module, inputs) if case.run else module(**inputs)
 
     tensors: dict[str, torch.Tensor] = {}
     for name, parameter in module.state_dict().items():
         tensors[f"weight.{name}"] = parameter
-    for name, value in inputs.items():
+    for name, value in recorded.items():
         tensors[f"input.{name}"] = value
     tensors.update(_as_tensor_map(result, "output"))
+
+    # An in-place module returns its own input tensor, so the recorded output would
+    # alias the (already overwritten) input. Detach a copy so both are independent.
+    for name in list(tensors):
+        tensors[name] = tensors[name].detach().clone()
 
     directory = output / case.name
     directory.mkdir(parents=True, exist_ok=True)
@@ -308,7 +465,13 @@ def case_names() -> tuple[str, ...]:
         "adaptive_layernorm",
         "attention_pair_bias_no_s",
         "attention_pair_bias_with_s",
+        "msa_module",
+        "msa_pair_weighted_averaging",
+        "msa_stack",
         "outer_product_mean",
+        "pairformer_block",
+        "pairformer_block_scale_up",
+        "pairformer_stack",
         "transition",
         "triangle_attention_ending",
         "triangle_attention_starting",

@@ -203,6 +203,76 @@ struct ParityTests {
     #expect(maximumDeviation(output, fixture.expected) < tolerance)
   }
 
+  @Test(
+    "pairformer block matches upstream",
+    arguments: ["pairformer_block", "pairformer_block_scale_up"])
+  func pairformerBlock(name: String) throws {
+    guard let fixture = try fixture(name) else { return }
+    let block = try PairformerBlock(
+      store: fixture.store(rootedAt: "m"), path: "m",
+      headCount: fixture.integer("n_heads"),
+      pairHeadCount: fixture.integer("pair_head_count"))
+    let (single, pair) = block(fixture.input("s"), fixture.input("z"))
+    // The block returns (s, z); the fixture flattens that tuple positionally.
+    let expectedSingle = fixture.tensors["output.0"]!
+    let expectedPair = fixture.tensors["output.1"]!
+    #expect(single != nil)
+    #expect(maximumDeviation(single!, expectedSingle) < tolerance)
+    #expect(maximumDeviation(pair, expectedPair) < tolerance)
+  }
+
+  @Test("pairformer stack matches upstream across blocks")
+  func pairformerStack() throws {
+    guard let fixture = try fixture("pairformer_stack") else { return }
+    let stack = try PairformerStack(
+      store: fixture.store(rootedAt: "m"), path: "m",
+      blockCount: fixture.integer("n_blocks"),
+      headCount: fixture.integer("n_heads"),
+      pairHeadCount: fixture.integer("pair_head_count"))
+    #expect(stack.blockCount == 3)
+    let (single, pair) = stack(fixture.input("s"), fixture.input("z"))
+    #expect(maximumDeviation(single!, fixture.tensors["output.0"]!) < tolerance)
+    #expect(maximumDeviation(pair, fixture.tensors["output.1"]!) < tolerance)
+  }
+
+  @Test("msa pair-weighted averaging matches upstream")
+  func msaPairWeightedAveraging() throws {
+    guard let fixture = try fixture("msa_pair_weighted_averaging") else { return }
+    let layer = try MSAPairWeightedAveraging(
+      store: fixture.store(rootedAt: "m"), path: "m",
+      headCount: fixture.integer("n_heads"))
+    let output = layer(fixture.input("m"), fixture.input("z"))
+    #expect(output.shape == fixture.expected.shape)
+    #expect(maximumDeviation(output, fixture.expected) < tolerance)
+  }
+
+  @Test("msa stack matches upstream")
+  func msaStack() throws {
+    guard let fixture = try fixture("msa_stack") else { return }
+    let stack = try MSAStack(
+      store: fixture.store(rootedAt: "m"), path: "m",
+      headCount: fixture.integer("n_heads"))
+    let output = stack(fixture.input("m"), fixture.input("z"))
+    #expect(maximumDeviation(output, fixture.expected) < tolerance)
+  }
+
+  @Test("msa module matches upstream, including the stackless last block")
+  func msaModule() throws {
+    guard let fixture = try fixture("msa_module") else { return }
+    let store = try fixture.store(rootedAt: "m")
+    let module = try MSAModule(
+      store: store, path: "m", blockCount: fixture.integer("n_blocks"),
+      pairHeadCount: fixture.integer("pair_head_count"),
+      msaHeadCount: fixture.integer("msa_head_count"))
+    #expect(module.blockCount == 2)
+    // Upstream drops the MSA stack from the final block entirely; its absence has to
+    // be read from the weights, not inferred from an index.
+    #expect(module.blocks.first?.isLastBlock == false)
+    #expect(module.blocks.last?.isLastBlock == true)
+    let output = module(fixture.input("m"), fixture.input("z"))
+    #expect(maximumDeviation(output, fixture.expected) < tolerance)
+  }
+
   @Test("outer product mean matches upstream")
   func outerProductMean() throws {
     guard let fixture = try fixture("outer_product_mean") else { return }
