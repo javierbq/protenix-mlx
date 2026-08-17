@@ -18,6 +18,9 @@ public enum ProtenixError: Error, Equatable, Sendable {
   case missingQuantizationSpec(String)
   case malformedQuantizedMatrix(name: String, reason: String)
   case unsupportedModel(String)
+  case unsupportedResidue(String)
+  case emptyChain(String)
+  case tooManyChains(count: Int, limit: Int)
 }
 
 extension ProtenixError: LocalizedError {
@@ -52,6 +55,17 @@ extension ProtenixError: LocalizedError {
       return "quantized matrix \(name) is unusable: \(reason)"
     case .unsupportedModel(let name):
       return "this runtime does not implement the Protenix variant \(name)"
+    case .unsupportedResidue(let letter):
+      // Named, never substituted. Upstream's tokenizers resolve an unknown letter to X
+      // and fold on, which returns a structure for a sequence nobody asked for.
+      return
+        "\(letter) is not a residue this runtime can fold: it carries reference "
+        + "conformers for the canonical 20 only, and neither ligands, nucleic acids, "
+        + "modified residues nor X, U, B or Z are among them"
+    case .emptyChain(let chain):
+      return "chain \(chain) has no residues"
+    case .tooManyChains(let count, let limit):
+      return "\(count) chains exceeds the \(limit) this runtime labels"
     }
   }
 }
