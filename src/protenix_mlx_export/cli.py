@@ -101,7 +101,11 @@ def make_fixtures_command(output: Path, source: Path | None, seed: int) -> None:
 
 
 @cli.command("export-features")
-@click.option("--sequence", required=True, help="A protein sequence (one chain).")
+@click.option(
+    "--sequence",
+    required=True,
+    help='Protein sequence. Separate chains of a complex with "/".',
+)
 @click.option("--output", type=click.Path(path_type=Path), required=True)
 @click.option("--name", default="prediction", show_default=True)
 @click.option(
@@ -110,21 +114,120 @@ def make_fixtures_command(output: Path, source: Path | None, seed: int) -> None:
     default=None,
     help="A Protenix checkout, if not already importable.",
 )
+@click.option(
+    "--augment/--no-augment",
+    default=False,
+    show_default=True,
+    help="Apply upstream's random rotation/translation per reference conformer. "
+         "Off makes the bundle a function of the sequence alone.",
+)
+@click.option(
+    "--seed", type=int, default=0, show_default=True,
+    help="Seeds the augmentation RNG. Ignored without --augment.",
+)
 def export_features_command(
-    sequence: str, output: Path, name: str, source: Path | None
+    sequence: str, output: Path, name: str, source: Path | None,
+    augment: bool, seed: int,
 ) -> None:
-    """Featurize a sequence into a Swift-loadable feature bundle.
+    """Featurize one or more chains into a Swift-loadable feature bundle.
 
     Needs upstream Protenix importable and the CCD cache reachable via
     PROTENIX_ROOT_DIR (a tree with common/components.cif and its rdkit pickle).
     Runs a single-sequence dummy MSA -- no alignment or templates.
+
+    Identical sequences are folded as copies of one entity, which is what makes a
+    homodimer's relp say the two chains are related.
     """
     from protenix_mlx_export.feature_export import export_features  # noqa: PLC0415
 
     features = export_features(
-        sequence=sequence, output=output, name=name, source=source)
+        sequence=sequence, output=output, name=name, source=source,
+        augment=augment, seed=seed)
+    chains = ", ".join(
+        f"{chain_id}:{len(chain_sequence)}" for chain_id, chain_sequence in features.chains
+    )
     click.echo(
-        f"wrote {features.token_count} tokens / {features.atom_count} atoms to {output}")
+        f"wrote {features.token_count} tokens / {features.atom_count} atoms "
+        f"({chains}) to {output}")
+
+
+@cli.command("export-residue-templates")
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path),
+    default=Path("Sources/ProtenixMLX/Resources/residue_templates.json"),
+    show_default=True,
+    help="Where to write the table. The default is where the Swift package reads it.",
+)
+@click.option(
+    "--source",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    help="A Protenix checkout, if not already importable.",
+)
+@click.option(
+    "--verify/--no-verify",
+    default=True,
+    show_default=True,
+    help="Rebuild sample sequences from the table and require upstream to agree bitwise.",
+)
+def export_residue_templates_command(
+    output: Path, source: Path | None, verify: bool
+) -> None:
+    """Freeze the canonical-20 reference conformers into a table Swift can ship.
+
+    This is what removes torch, rdkit and a 624 MB components.cif from the machine doing
+    the fold: for a standard amino acid, everything the featurizer looks up in the CCD is
+    a constant. Derived by running upstream's own featurizer, never by reimplementing it.
+    """
+    from protenix_mlx_export.residue_templates import (  # noqa: PLC0415
+        load_templates,
+        write_templates,
+    )
+
+    commit = ""
+    if source is not None:
+        head = source / ".git" / "HEAD"
+        if head.is_file():
+            commit = _resolve_git_head(source)
+    templates = write_templates(output, source=source, upstream_commit=commit)
+    atoms = sum(len(t.atoms) + len(t.terminal_atoms) for t in templates)
+    click.echo(
+        f"wrote {len(templates)} residues / {atoms} reference atoms to {output} "
+        f"({output.stat().st_size / 1024:.1f} KiB)"
+    )
+    if verify:
+        from protenix_mlx_export.residue_templates import (  # noqa: PLC0415
+            verify_templates,
+        )
+
+        sequences = [
+            "GSHM",
+            "ACDEFGHIKLMNPQRSTVWY",
+            "M",
+            "GSHM/AWKD",
+            "GSHM/GSHM",
+            "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQ",
+        ]
+        verify_templates(load_templates(output), sequences=sequences, source=source)
+        click.echo(f"verified bitwise against upstream on {len(sequences)} sequences")
+
+
+def _resolve_git_head(repository: Path) -> str:
+    """The commit a checkout is on, for the table's provenance field."""
+    head = (repository / ".git" / "HEAD").read_text(encoding="utf-8").strip()
+    if head.startswith("ref: "):
+        reference = repository / ".git" / head.removeprefix("ref: ")
+        if reference.is_file():
+            return reference.read_text(encoding="utf-8").strip()
+        packed = repository / ".git" / "packed-refs"
+        if packed.is_file():
+            target = head.removeprefix("ref: ")
+            for line in packed.read_text(encoding="utf-8").splitlines():
+                if line.endswith(f" {target}"):
+                    return line.split(" ", 1)[0]
+        return ""
+    return head
 
 
 @cli.command("pack")

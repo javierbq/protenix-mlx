@@ -178,6 +178,22 @@ class TestVariantConfigs:
         with pytest.raises(KeyError):
             ModelConfiguration.from_model_name("protenix_imaginary_v9")
 
+    def test_resolution_leaves_sys_modules_as_it_found_it(self) -> None:
+        """The pinned tree carries only `protenix.config`, and it must not linger.
+
+        Left cached, it shadows a real Protenix checkout for the rest of the process:
+        every later `import protenix.data...` raises ModuleNotFoundError, which is how
+        the feature exporter fails when a config was resolved first in the same
+        process. The reverse also has to hold -- a real `protenix` imported earlier
+        must not be what `resolve_upstream_config` reads its dimensions from.
+        """
+        import sys
+
+        before = {name for name in sys.modules if name.split(".")[0] == "protenix"}
+        resolve_upstream_config(TINY)
+        after = {name for name in sys.modules if name.split(".")[0] == "protenix"}
+        assert after == before
+
 
 class TestProvenance:
     """A mirrored checkpoint must stay identifiable as one after it leaves here."""

@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import copy
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
 
 #: Verbatim copies of upstream's config tree. Vendored rather than depended on
 #: because installing Protenix proper pulls rdkit, biotite, deepspeed and a CUDA
@@ -149,40 +150,91 @@ def resolve_upstream_config(model_name: str) -> Any:
     inserted = upstream not in sys.path
     if inserted:
         sys.path.insert(0, upstream)
+    # sys.path is only half of it. An import already CACHED beats any path, in both
+    # directions, and both directions have bitten:
+    #
+    #  * a real `protenix` imported earlier means `protenix.config` below resolves to
+    #    that install and the pinned tree loses, silently, which is the exact failure
+    #    the comment above says the prepend prevents;
+    #  * the vendored tree carries only `protenix.config`, so leaving it cached breaks
+    #    every later `import protenix.data...` with ModuleNotFoundError -- which is how
+    #    the feature exporter fails, but only when something resolved a config first in
+    #    the same process.
+    #
+    # So `protenix*` is swapped out for the duration and put back exactly as found.
     try:
-        from configs.configs_base import configs as configs_base
-        from configs.configs_data import data_configs
-        from configs.configs_inference import inference_configs
-        from configs.configs_model_type import model_configs
-        from protenix.config import parse_configs
-
-        if model_name not in model_configs:
-            supported = ", ".join(sorted(model_configs))
-            message = (
-                f"model {model_name!r} is not in the pinned upstream config tree; "
-                f"available: {supported}"
-            )
-            raise KeyError(message)
-
-        # Deep-copied, not spread. `{**configs_base}` copies only the top level, so a
-        # deep merge would write THROUGH the shared nested dicts into the imported
-        # module and leak one variant's block counts into the next export in the same
-        # process -- upstream's runner has the same shape but only ever resolves one
-        # model per process, so it never notices.
-        merged = copy.deepcopy(
-            {**configs_base, **{"data": data_configs}, **inference_configs}
-        )
-        _deep_update(merged, copy.deepcopy(model_configs[model_name]))
-        # `arg_str=""` keeps resolution independent of this process's argv; upstream's
-        # parser reads sys.argv by default and would otherwise pick up our own flags.
-        return parse_configs(
-            configs=merged,
-            arg_str="",
-            fill_required_with_null=True,
-        )
+        with _isolated_modules("protenix", "configs"):
+            return _resolve_from_pinned_tree(model_name)
     finally:
         if inserted:
             sys.path.remove(upstream)
+
+
+def _resolve_from_pinned_tree(model_name: str) -> Any:
+    """Import the pinned config tree and merge one model's overrides into the base.
+
+    Called only with the pinned tree first on `sys.path` and `protenix*` evicted from
+    `sys.modules`, both of which `resolve_upstream_config` arranges.
+    """
+    from configs.configs_base import configs as configs_base
+    from configs.configs_data import data_configs
+    from configs.configs_inference import inference_configs
+    from configs.configs_model_type import model_configs
+    from protenix.config import parse_configs
+
+    if model_name not in model_configs:
+        supported = ", ".join(sorted(model_configs))
+        message = (
+            f"model {model_name!r} is not in the pinned upstream config tree; "
+            f"available: {supported}"
+        )
+        raise KeyError(message)
+
+    # Deep-copied, not spread. `{**configs_base}` copies only the top level, so a
+    # deep merge would write THROUGH the shared nested dicts into the imported
+    # module and leak one variant's block counts into the next export in the same
+    # process -- upstream's runner has the same shape but only ever resolves one
+    # model per process, so it never notices.
+    merged = copy.deepcopy(
+        {**configs_base, **{"data": data_configs}, **inference_configs}
+    )
+    _deep_update(merged, copy.deepcopy(model_configs[model_name]))
+    # `arg_str=""` keeps resolution independent of this process's argv; upstream's
+    # parser reads sys.argv by default and would otherwise pick up our own flags.
+    return parse_configs(
+        configs=merged,
+        arg_str="",
+        fill_required_with_null=True,
+    )
+
+
+@contextmanager
+def _isolated_modules(*roots: str) -> Iterator[None]:
+    """Evict `roots` and their submodules from `sys.modules`, restoring them after.
+
+    An imported package is cached under its top-level name, so a partially-vendored
+    tree and a full checkout cannot both be `protenix` in one process unless whoever
+    imports one puts the other back.
+    """
+    prefixes = tuple(roots)
+    saved = {
+        name: module
+        for name, module in sys.modules.items()
+        if name in prefixes or name.startswith(tuple(f"{root}." for root in prefixes))
+    }
+    for name in saved:
+        del sys.modules[name]
+    try:
+        yield
+    finally:
+        for name in [
+            name
+            for name in sys.modules
+            if name in prefixes
+            or name.startswith(tuple(f"{root}." for root in prefixes))
+        ]:
+            del sys.modules[name]
+        sys.modules.update(saved)
 
 
 def _deep_update(target: dict[str, Any], updates: Mapping[str, Any]) -> dict[str, Any]:
