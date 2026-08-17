@@ -248,6 +248,25 @@ Two details worth knowing:
   (Protenix mixes `nn.Linear` and `LinearNoBias` freely); the latter is the quantizer's
   zero-point. The runtime looks up exactly `.bias` and never confuses the two.
 
+## Published weights
+
+All four variants are published as GitHub release assets, three precisions each, pinned by
+digest in **[WEIGHTS.md](WEIGHTS.md)**:
+
+| Variant | int8 | Release |
+| :--- | ---: | :--- |
+| tiny (110.65 M) | 83.5 MB | [weights-tiny-v1](https://github.com/javierbq/protenix-mlx/releases/tag/weights-tiny-v1) |
+| mini (134.07 M) | 91.8 MB | [weights-mini-v1](https://github.com/javierbq/protenix-mlx/releases/tag/weights-mini-v1) |
+| base (368.48 M) | 214.3 MB | [weights-base-v1](https://github.com/javierbq/protenix-mlx/releases/tag/weights-base-v1) |
+| v2 (464.44 M) *mirror* | 285.5 MB | [weights-v2-v1](https://github.com/javierbq/protenix-mlx/releases/tag/weights-v2-v1) |
+
+```bash
+# grab a pack and unzip it into an artifact directory
+curl -L -o tiny-int8.zip \
+  https://github.com/javierbq/protenix-mlx/releases/download/weights-tiny-v1/protenix-tiny-mlx-int8-v1.zip
+unzip tiny-int8.zip -d artifacts/protenix-tiny-mlx-int8
+```
+
 ## Distribution
 
 Packs are published as release ZIPs and pinned downstream by `(url, sha256, size,
