@@ -360,6 +360,45 @@ struct ParityTests {
     #expect(bias.min().item(Float.self) < -1e9)
   }
 
+  @Test("atom attention encoder matches upstream")
+  func atomAttentionEncoder() throws {
+    guard let fixture = try fixture("atom_attention_encoder") else { return }
+    let store = try fixture.store(rootedAt: "m")
+    let encoder = try AtomAttentionEncoder(
+      store: store, path: "m", blockCount: fixture.integer("n_blocks"),
+      headCount: fixture.integer("n_heads"), queryWindow: fixture.integer("n_queries"),
+      keyWindow: fixture.integer("n_keys"))
+    #expect(encoder.hasCoords)
+    let features = AtomAttentionEncoder.Features(
+      refPos: fixture.input("ref_pos"), refCharge: fixture.input("ref_charge"),
+      refMask: fixture.input("ref_mask"), refElement: fixture.input("ref_element"),
+      refAtomNameChars: fixture.input("ref_atom_name_chars"),
+      atomToToken: fixture.input("atom_to_token_idx"), dLM: fixture.input("d_lm"),
+      vLM: fixture.input("v_lm"), maskTrunked: fixture.input("mask_trunked"))
+    let output = encoder(
+      features, r: fixture.input("r_l"), s: fixture.input("s"), z: fixture.input("z"),
+      tokenCount: fixture.integer("n_tokens"))
+    #expect(maximumDeviation(output.a, fixture.tensors["output.a"]!) < tolerance)
+    #expect(maximumDeviation(output.qSkip, fixture.tensors["output.q_skip"]!) < tolerance)
+    #expect(maximumDeviation(output.cSkip, fixture.tensors["output.c_skip"]!) < tolerance)
+    #expect(maximumDeviation(output.pSkip, fixture.tensors["output.p_skip"]!) < tolerance)
+  }
+
+  @Test("atom attention decoder matches upstream")
+  func atomAttentionDecoder() throws {
+    guard let fixture = try fixture("atom_attention_decoder") else { return }
+    let decoder = try AtomAttentionDecoder(
+      store: try fixture.store(rootedAt: "m"), path: "m",
+      blockCount: fixture.integer("n_blocks"), headCount: fixture.integer("n_heads"),
+      queryWindow: fixture.integer("n_queries"), keyWindow: fixture.integer("n_keys"))
+    let output = decoder(
+      fixture.input("a"), atomToToken: fixture.input("atom_to_token_idx"),
+      qSkip: fixture.input("q_skip"), cSkip: fixture.input("c_skip"),
+      pSkip: fixture.input("p_skip"))
+    #expect(output.shape == fixture.expected.shape)
+    #expect(maximumDeviation(output, fixture.expected) < tolerance)
+  }
+
   @Test("outer product mean matches upstream")
   func outerProductMean() throws {
     guard let fixture = try fixture("outer_product_mean") else { return }

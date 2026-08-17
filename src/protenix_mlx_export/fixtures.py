@@ -443,6 +443,32 @@ def _cases() -> list[FixtureCase]:
             ),
         ),
         FixtureCase(
+            name="atom_attention_encoder",
+            build=_build_atom_encoder,
+            config={
+                "c_token": c_s, "c_atom": c_a, "c_atompair": SMALL["c_atompair"],
+                "c_s": c_s, "c_z": c_z, "n_blocks": 2, "n_heads": n_heads,
+                "n_queries": 32, "n_keys": 128,
+                "n_atoms": SMALL["n_atoms"], "n_tokens": n_tokens,
+            },
+            run=_run_atom_encoder,
+        ),
+        FixtureCase(
+            name="atom_attention_decoder",
+            build=_build_atom_decoder,
+            config={
+                "c_token": c_s, "c_atom": c_a, "c_atompair": SMALL["c_atompair"],
+                "n_blocks": 2, "n_heads": n_heads, "n_queries": SMALL["n_queries"],
+                "n_keys": SMALL["n_keys"], "n_atoms": SMALL["n_atoms"],
+                "n_tokens": n_tokens,
+            },
+            run=lambda module, inputs: module(
+                atom_to_token_idx=inputs["atom_to_token_idx"],
+                a=inputs["a"], q_skip=inputs["q_skip"], c_skip=inputs["c_skip"],
+                p_skip=inputs["p_skip"],
+            ),
+        ),
+        FixtureCase(
             # Three blocks, so an error in how blocks are chained (feeding the wrong
             # tensor forward, or reusing block 0's weights) cannot hide.
             name="pairformer_stack",
@@ -485,6 +511,108 @@ def _run_conditioning(module: Any, inputs: dict) -> dict:
         pair_z=pair,
     )
     return {"pair": pair_out, "single": single}
+
+
+def _atom_features(n_atoms: int, n_tokens: int, c_z: int, c_s: int, c_atom_in: int):
+    """Build a toy atom-attention input, with d_lm/v_lm/pad_info from upstream."""
+    from protenix.model.protenix import update_input_feature_dict
+
+    generator = torch.Generator().manual_seed(7)
+    # A contiguous atom->token map, roughly n_atoms/n_tokens atoms per token.
+    per_token = max(1, n_atoms // n_tokens)
+    atom_to_token = torch.clamp(
+        torch.arange(n_atoms) // per_token, max=n_tokens - 1
+    ).long()
+    ref_space_uid = atom_to_token.clone()
+    features = {
+        "ref_pos": torch.randn(1, n_atoms, 3, generator=generator),
+        "ref_space_uid": ref_space_uid.reshape(1, n_atoms),  # batched for feature prep
+    }
+    update_input_feature_dict(features)
+    return atom_to_token, features
+
+
+def _build_atom_encoder():
+    """Construct an AtomAttentionEncoder (has_coords) and its inputs."""
+    from protenix.model.modules.transformer import AtomAttentionEncoder
+
+    c_z, c_s, c_a = SMALL["c_z"], SMALL["c_s"], SMALL["c_a"]
+    n_atoms, n_tokens = SMALL["n_atoms"], SMALL["n_tokens"]
+    # update_input_feature_dict hardcodes these; the encoder must match.
+    n_queries, n_keys = 32, 128
+    generator = torch.Generator().manual_seed(11)
+
+    module = AtomAttentionEncoder(
+        has_coords=True, c_token=c_s, c_atom=c_a, c_atompair=SMALL["c_atompair"],
+        c_s=c_s, c_z=c_z, n_blocks=2, n_heads=SMALL["n_heads"],
+        n_queries=n_queries, n_keys=n_keys,
+    )
+    atom_to_token, feats = _atom_features(n_atoms, n_tokens, c_z, c_s, c_a)
+    inputs = {
+        "atom_to_token_idx": atom_to_token,  # 1-D [N_atom]
+        "ref_pos": feats["ref_pos"],
+        "ref_charge": torch.randn(1, n_atoms, generator=generator),
+        "ref_mask": torch.ones(1, n_atoms),
+        "ref_element": torch.randn(1, n_atoms, 128, generator=generator),
+        "ref_atom_name_chars": torch.randn(1, n_atoms, 4 * 64, generator=generator),
+        # v_lm / mask_trunked are boolean geometry features; the network casts them to
+        # float, so they are stored float here to match what the bundle would carry.
+        "d_lm": feats["d_lm"],
+        "v_lm": feats["v_lm"].float(),
+        "mask_trunked": feats["pad_info"]["mask_trunked"].float(),
+        "r_l": torch.randn(1, 1, n_atoms, 3, generator=generator),
+        "s": torch.randn(1, 1, n_tokens, c_s, generator=generator),
+        "z": torch.randn(1, 1, n_tokens, n_tokens, c_z, generator=generator),
+    }
+    return module, inputs
+
+
+def _build_atom_decoder():
+    """Construct an AtomAttentionDecoder and its inputs."""
+    from protenix.model.modules.transformer import AtomAttentionDecoder
+
+    c_s, c_a = SMALL["c_s"], SMALL["c_a"]
+    n_atoms, n_tokens = SMALL["n_atoms"], SMALL["n_tokens"]
+    n_queries, n_keys = SMALL["n_queries"], SMALL["n_keys"]
+    n_blocks = -(-n_atoms // n_queries)
+    generator = torch.Generator().manual_seed(13)
+
+    module = AtomAttentionDecoder(
+        n_blocks=2, n_heads=SMALL["n_heads"], c_token=c_s, c_atom=c_a,
+        c_atompair=SMALL["c_atompair"], n_queries=n_queries, n_keys=n_keys,
+    )
+    atom_to_token = torch.clamp(
+        torch.arange(n_atoms) // max(1, n_atoms // n_tokens), max=n_tokens - 1
+    ).long()
+    inputs = {
+        "atom_to_token_idx": atom_to_token,  # 1-D [N_atom]
+        "a": torch.randn(1, n_tokens, c_s, generator=generator),
+        "q_skip": torch.randn(1, n_atoms, c_a, generator=generator),
+        "c_skip": torch.randn(1, n_atoms, c_a, generator=generator),
+        "p_skip": torch.randn(
+            1, n_blocks, n_queries, n_keys, SMALL["c_atompair"], generator=generator
+        ),
+    }
+    return module, inputs
+
+
+def _run_atom_encoder(module: Any, inputs: dict) -> dict:
+    """Run AtomAttentionEncoder.forward (has_coords) and name its four outputs."""
+    a, q_l, c_l, p_lm = module(
+        atom_to_token_idx=inputs["atom_to_token_idx"],
+        ref_pos=inputs["ref_pos"],
+        ref_charge=inputs["ref_charge"],
+        ref_mask=inputs["ref_mask"],
+        ref_atom_name_chars=inputs["ref_atom_name_chars"],
+        ref_element=inputs["ref_element"],
+        d_lm=inputs["d_lm"],
+        v_lm=inputs["v_lm"],
+        pad_info={"mask_trunked": inputs["mask_trunked"]},
+        r_l=inputs["r_l"],
+        s=inputs["s"],
+        z=inputs["z"],
+    )
+    return {"a": a, "q_skip": q_l, "c_skip": c_l, "p_skip": p_lm}
 
 
 def _run_msa_blocks(module: Any, m: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
@@ -592,6 +720,8 @@ def case_names() -> tuple[str, ...]:
     return (
         "adaptive_layernorm",
         "attention_pair_bias_no_s",
+        "atom_attention_decoder",
+        "atom_attention_encoder",
         "atom_transformer",
         "attention_pair_bias_with_s",
         "conditioned_transition_block",
