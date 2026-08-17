@@ -55,6 +55,7 @@ struct Predict: ParsableCommand {
   }
 
   func run() throws {
+    let started = Date()
     let artifact = try ProtenixArtifact.load(
       from: URL(fileURLWithPath: model))
     let bundle =
@@ -88,6 +89,14 @@ struct Predict: ParsableCommand {
     if let scores {
       print(String(format: "mean pLDDT   %.1f", scores.meanPLDDT))
     }
+    // MLX's own high-water mark, not the process's RSS. They are not the same number
+    // and RSS is the wrong one: MLX allocates through Metal and recycles buffers in a
+    // cache it may not return to the OS, so RSS both lags real peak allocation and is
+    // not monotonic in problem size. Anything sizing a memory guard needs this one.
+    print(
+      String(
+        format: "peak memory  %.0f MiB", Double(Memory.peakMemory) / (1024 * 1024)))
+    print(String(format: "elapsed      %.1f s", Date().timeIntervalSince(started)))
     let pdb = StructureWriter.pdb(
       coordinates: coordinates, atoms: bundle.metadata.atoms,
       bFactors: scores?.plddt)
